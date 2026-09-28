@@ -13,6 +13,7 @@ import (
 	"github.com/nisha-ts-40599/blink-backend/internal/agent"
 	"github.com/nisha-ts-40599/blink-backend/internal/auth"
 	"github.com/nisha-ts-40599/blink-backend/internal/chat"
+	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 	"github.com/nisha-ts-40599/blink-backend/internal/config"
 	"github.com/nisha-ts-40599/blink-backend/internal/crypto"
 	"github.com/nisha-ts-40599/blink-backend/internal/db"
@@ -54,6 +55,7 @@ func main() {
 	mail := mailer.New(cfg)
 	authSvc := auth.New(pool, cfg, mail)
 	proj := project.New(pool)
+	canonicalSvc := canonical.New(pool)
 	agentClient := agent.New(cfg)
 	integ := integrations.New(pool, cfg, box)
 	s3svc := s3ws.New(cfg)
@@ -64,7 +66,7 @@ func main() {
 		s3svc = s3ws.New(cfg)
 	}
 	chatStore := chat.New(pool)
-	handler := httpapi.New(cfg, authSvc, proj, agentClient, mail, integ, s3svc, chatStore)
+	handler := httpapi.New(cfg, authSvc, proj, canonicalSvc, agentClient, mail, integ, s3svc, chatStore)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -85,6 +87,22 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if err := canonicalSvc.ProcessQueuedProjections(context.Background(), 20); err != nil {
+					log.Printf("projection worker: %v", err)
+				}
+			}
+		}
+	}()
+
 	<-stop
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

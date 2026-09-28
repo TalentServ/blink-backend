@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/nisha-ts-40599/blink-backend/internal/agent"
 	"github.com/nisha-ts-40599/blink-backend/internal/auth"
+	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 	"github.com/nisha-ts-40599/blink-backend/internal/chat"
 	"github.com/nisha-ts-40599/blink-backend/internal/config"
 	"github.com/nisha-ts-40599/blink-backend/internal/integrations"
@@ -26,18 +27,23 @@ import (
 )
 
 type Server struct {
-	cfg   config.Config
-	auth  *auth.Service
-	proj  *project.Service
-	agent *agent.Client
-	mail  *mailer.Service
-	integ *integrations.Service
-	s3    *s3ws.Service
-	chat  *chat.Store
+	cfg       config.Config
+	auth      *auth.Service
+	proj      *project.Service
+	canonical *canonical.Service
+	agent     *agent.Client
+	mail      *mailer.Service
+	integ     *integrations.Service
+	s3        *s3ws.Service
+	chat      *chat.Store
 }
 
-func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store) http.Handler {
-	s := &Server{cfg: cfg, auth: authSvc, proj: proj, agent: agentClient, mail: mail, integ: integ, s3: s3, chat: chatStore}
+func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store) http.Handler {
+	integ.BindProjectionEnqueue(func(ctx context.Context, projectID int64, provider, actionType string, payload map[string]any, correlationID string) (int64, error) {
+		return canonicalSvc.EnqueueProjection(ctx, projectID, provider, actionType, payload, correlationID)
+	})
+	s := &Server{cfg: cfg, auth: authSvc, proj: proj, canonical: canonicalSvc, agent: agentClient, mail: mail, integ: integ, s3: s3, chat: chatStore}
+	s.bindCanonicalCommandExecutor()
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID, chimw.RealIP, chimw.Logger, chimw.Recoverer)
 	r.Use(cors.Handler(cors.Options{
@@ -133,24 +139,37 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 				prr.Post("/{id}/grooming-stakeholder-pack", s.groomingStakeholderPack)
 				prr.Post("/{id}/grooming-revision", s.groomingRevision)
 				prr.Post("/{id}/grooming-sign-off-capture", s.groomingSignOffCapture)
-				prr.Post("/{id}/git-apply", manualProviderAction("Commit the workspace guidance locally, then run the framework readiness refresh before returning to Blink."))
-				prr.Post("/{id}/implement-step", manualProviderAction("Use the generated Cursor handoff for local implementation. Blink does not create branches, commits, or pull requests."))
+				prr.Post("/{id}/git-apply", s.gitApply)
+				prr.Post("/{id}/implement-step", s.implementStepApply)
 				prr.Post("/{id}/qa-validation", s.qaValidation)
 				prr.Post("/{id}/sdlc-start", s.sdlcStart)
 				prr.Post("/{id}/sdlc-next", s.sdlcNext)
-				prr.Post("/{id}/jira-gate-evidence", manualProviderAction("Record gates through the framework. If Jira evidence is needed, post it manually from the provider."))
+				prr.Post("/{id}/jira-gate-evidence", s.jiraGateEvidence)
 				prr.Post("/{id}/setup", s.setupProject)
 				prr.Post("/{id}/download", s.downloadProject)
 				prr.Get("/{id}/chat", s.getProjectChat)
 				prr.Post("/{id}/chat/messages", s.postProjectChatMessage)
 				prr.Delete("/{id}/chat/messages", s.clearProjectChat)
+				prr.Get("/{id}/canonical/snapshot", s.canonicalSnapshot)
+				prr.Get("/{id}/canonical/history", s.canonicalHistory)
+				prr.Get("/{id}/canonical/blockers", s.canonicalBlockers)
+				prr.Get("/{id}/canonical/projections", s.canonicalProjections)
+				prr.Post("/{id}/canonical/commands/preview", s.canonicalCommandPreview)
+				prr.Post("/{id}/canonical/commands/execute", s.canonicalCommandExecute)
+				prr.Post("/{id}/canonical/gates/confirm", s.canonicalGateConfirm)
+				prr.Get("/{id}/canonical/grooming-readiness", s.canonicalGroomingReadiness)
+				prr.Get("/{id}/canonical/graph", s.canonicalGraph)
+				prr.Get("/{id}/canonical/requirements/history", s.canonicalRequirementHistory)
+				prr.Post("/{id}/canonical/domain/confirm", s.canonicalDomainGate)
+				prr.Get("/{id}/canonical/ship/session", s.canonicalShipSession)
+				prr.Post("/{id}/canonical/ship/checkpoint", s.canonicalShipCheckpoint)
 				prr.Get("/{id}", s.getProject)
 			})
 
 			pr.Route("/integrations", func(ir chi.Router) {
 				ir.Get("/", s.integ.ListMine)
 				ir.Post("/connect", s.integ.Connect)
-				ir.Post("/repositories", manualProviderAction("Create repositories manually in GitHub, then return their URLs to Blink for framework reconciliation."))
+				ir.Post("/repositories", s.integ.CreateRepositories)
 				ir.Get("/jira/oauth/url", s.integ.JiraOAuthURL)
 				ir.Post("/jira/oauth/exchange", s.integ.JiraOAuthExchange)
 				ir.Get("/github/oauth/url", s.integ.GitHubOAuthURL)
@@ -170,13 +189,13 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 				ir.Post("/figma/sync", s.integ.IngestFigmaDesign)
 				ir.Post("/stitch/designs", s.integ.ProposeStitchDesigns)
 				ir.Post("/stitch/designs/choose", s.integ.ChooseStitchDesign)
-				ir.Post("/jira/issues", manualProviderAction("Create Jira issues manually. Blink can retain the proposed epic and story details as a draft."))
-				ir.Post("/jira/issues/delete", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
+				ir.Post("/jira/issues", s.integ.CreateJiraIssues)
+				ir.Post("/jira/issues/delete", s.integ.DeleteJiraIssues)
 				ir.Post("/jira/issues/statuses", s.integ.JiraIssueStatuses)
-				ir.Post("/jira/issues/transition", manualProviderAction("Change Jira issue status manually in Jira. Blink does not transition provider records."))
-				ir.Post("/jira/comments", manualProviderAction("Post Jira comments manually in Jira. Blink does not write provider comments."))
+				ir.Post("/jira/issues/transition", s.integ.TransitionJiraIssue)
+				ir.Post("/jira/comments", s.integ.CreateJiraComment)
 				ir.Post("/jira/comments/poll", s.integ.PollJiraComments)
-				ir.Post("/jira/comments/reset-simulated", manualProviderAction("Remove simulated Jira replies manually in Jira. Blink does not delete provider comments."))
+				ir.Post("/jira/comments/reset-simulated", s.integ.ResetSimulatedJiraReplies)
 				ir.Post("/jira/discussions/summarize", s.summarizeDiscussion)
 				ir.Post("/binding", s.integ.Binding)
 			})
@@ -188,8 +207,8 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 			})
 			pr.Route("/dev/jira/issues", func(dr chi.Router) {
 				dr.Get("/", s.integ.ListBlinkIssues)
-				dr.Delete("/", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
-				dr.Delete("/{issueKey}", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
+				dr.Delete("/", s.integ.DeleteJiraIssues)
+				dr.Delete("/{issueKey}", s.integ.DeleteJiraIssues)
 			})
 		})
 	})
@@ -407,6 +426,13 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if s.canonical != nil {
+		stakeDigest := canonicalDigestStakeholders(req.Stakeholders)
+		if stale, _ := s.canonical.StakeholderRegistryStale(r.Context(), id, stakeDigest); stale {
+			_ = s.canonical.RevokeStakeholderConfirmation(r.Context(), id)
+		}
+		_ = s.canonical.RefreshEligibility(r.Context(), id, sessionEmail(r))
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -504,7 +530,10 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	payload["stakeholders"] = stakes
 	raw, err := s.agent.ConfirmStakeholders(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	if err == nil {
+		s.afterStakeholderConfirm(r.Context(), id, sessionEmail(r), stakes, raw)
+	}
+	s.writeAgentResult(w, r, p.ProjectName, id, "confirm-stakeholders", raw, err)
 }
 
 func (s *Server) planProductScopeID(w http.ResponseWriter, r *http.Request) {
@@ -607,7 +636,7 @@ func (s *Server) clarifyProductScopeID(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.ClarifyProductScope(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "clarify-product-scope", raw, err)
 }
 
 func (s *Server) clarifyProductScope(w http.ResponseWriter, r *http.Request) {

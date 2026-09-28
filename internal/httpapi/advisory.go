@@ -75,12 +75,13 @@ func (s *Server) advisoryPayload(r *http.Request, projectName string, id int64, 
 	return body
 }
 
-func (s *Server) writeAgentResult(w http.ResponseWriter, r *http.Request, projectName string, id int64, raw json.RawMessage, err error) {
+func (s *Server) writeAgentResult(w http.ResponseWriter, r *http.Request, projectName string, id int64, command string, raw json.RawMessage, err error) {
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	s.persistAgentOverlays(r, projectName, id, raw)
+	s.noteAgentRun(r.Context(), requestCarrier(r.Header.Get), id, command, raw)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(raw)
 }
@@ -103,7 +104,10 @@ func (s *Server) confirmProductScope(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.ConfirmProductScope(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	if err == nil {
+		s.afterProductScopeConfirm(r.Context(), id, sessionEmail(r), body, raw)
+	}
+	s.writeAgentResult(w, r, p.ProjectName, id, "confirm-product-scope", raw, err)
 }
 
 func (s *Server) classifyWork(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +128,7 @@ func (s *Server) classifyWork(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.ClassifyWork(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "classify-work", raw, err)
 }
 
 func (s *Server) proposeDesigns(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +149,7 @@ func (s *Server) proposeDesigns(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.ProposeDesigns(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "propose-designs", raw, err)
 }
 
 func (s *Server) proposeDesignsStandalone(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +188,7 @@ func (s *Server) createSpec(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.CreateSpec(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "create-spec", raw, err)
 }
 
 func (s *Server) technicalPlan(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +209,7 @@ func (s *Server) technicalPlan(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.TechnicalPlan(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "technical-plan", raw, err)
 }
 
 func (s *Server) sdlcStart(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +230,10 @@ func (s *Server) sdlcStart(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.SdlcStart(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	if err == nil {
+		s.afterSdlcStart(r.Context(), id, raw)
+	}
+	s.writeAgentResult(w, r, p.ProjectName, id, "sdlc-start", raw, err)
 }
 
 func (s *Server) sdlcNext(w http.ResponseWriter, r *http.Request) {
@@ -247,5 +254,5 @@ func (s *Server) sdlcNext(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.SdlcNext(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "sdlc-next", raw, err)
 }

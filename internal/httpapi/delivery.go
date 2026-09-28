@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 	"github.com/nisha-ts-40599/blink-backend/internal/githubgit"
 	"github.com/nisha-ts-40599/blink-backend/internal/s3ws"
 )
@@ -203,6 +205,16 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.canonical != nil {
+		_, _ = s.canonical.EnqueueProjection(r.Context(), id, "github", "git-apply", map[string]any{
+			"owner": owner, "repo": repo, "sha": result.SHA, "url": result.URL,
+		}, chimw.GetReqID(r.Context()))
+	}
+	s.recordShipDelivery(r.Context(), id, sessionEmail(r), "workspace", canonical.ShipStepGitApply, "",
+		map[string]any{"owner": owner, "repo": repo, "issueKey": body.IssueKey},
+		map[string]any{"sha": result.SHA, "url": result.URL, "treeCount": result.TreeCount, "evidence": evidence},
+	)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     "ok",
 		"message":    fmt.Sprintf("Committed %d overlay file(s) to %s/%s@%s", result.TreeCount, owner, repo, result.SHA[:min(7, len(result.SHA))]),
@@ -375,6 +387,11 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.recordShipDelivery(r.Context(), id, sessionEmail(r), "implementation", canonical.ShipStepImplement, "",
+		map[string]any{"issueId": issueID, "issueKey": body["issueKey"], "branch": branch},
+		map[string]any{"draftPullRequests": prs, "evidence": evidence},
+	)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":            "ok",
 		"message":           fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs)),
@@ -444,7 +461,12 @@ func (s *Server) qaValidation(w http.ResponseWriter, r *http.Request) {
 
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.QaValidation(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	if err == nil {
+		s.recordShipDelivery(r.Context(), id, sessionEmail(r), "review-pr", canonical.ShipStepQAValidation, "",
+			body, map[string]any{"agent": json.RawMessage(raw)},
+		)
+	}
+	s.writeAgentResult(w, r, p.ProjectName, id, "qa-validation", raw, err)
 }
 
 func (s *Server) jiraGateEvidence(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +529,7 @@ func (s *Server) groomingStakeholderPack(w http.ResponseWriter, r *http.Request)
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.GroomingStakeholderPack(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "grooming-stakeholder-pack", raw, err)
 }
 
 func (s *Server) groomingRevision(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +550,7 @@ func (s *Server) groomingRevision(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.GroomingRevision(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "grooming-revision", raw, err)
 }
 
 func (s *Server) groomingSignOffCapture(w http.ResponseWriter, r *http.Request) {
@@ -549,5 +571,5 @@ func (s *Server) groomingSignOffCapture(w http.ResponseWriter, r *http.Request) 
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.GroomingSignOffCapture(r.Context(), payload)
-	s.writeAgentResult(w, r, p.ProjectName, id, raw, err)
+	s.writeAgentResult(w, r, p.ProjectName, id, "grooming-sign-off-capture", raw, err)
 }

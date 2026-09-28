@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/google/uuid"
+	"github.com/nisha-ts-40599/blink-backend/internal/roles"
 )
 
 type Service struct {
@@ -246,7 +247,7 @@ func (s *Service) replaceStakeholders(ctx context.Context, tx pgx.Tx, projectID 
 		_, err := tx.Exec(ctx, `
 			INSERT INTO stakeholder (project_id, role_code, person_name, person_email, code, name, category, active, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,'BUSINESS',true,NOW(),NOW())
-		`, projectID, strings.TrimSpace(st.RoleCode), name, strings.TrimSpace(st.Email), code, name)
+		`, projectID, roles.NormalizeRoleCode(st.RoleCode), name, strings.TrimSpace(st.Email), code, name)
 		if err != nil {
 			return err
 		}
@@ -269,7 +270,8 @@ func (s *Service) listStakeholders(ctx context.Context, projectID int64) ([]Stak
 		if err := rows.Scan(&st.ID, &st.RoleCode, &st.Name, &st.Email); err != nil {
 			return nil, err
 		}
-		st.RoleName = st.RoleCode
+		st.RoleCode = roles.NormalizeRoleCode(st.RoleCode)
+		st.RoleName = roles.RoleDisplayName(st.RoleCode)
 		out = append(out, st)
 	}
 	return out, rows.Err()
