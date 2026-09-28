@@ -73,10 +73,18 @@ func (s *Server) ExecuteAgentCommand(ctx context.Context, projectID int64, comma
 		raw, err = s.agent.GroomingRevision(ctx, body)
 	case "grooming-sign-off-capture":
 		raw, err = s.agent.GroomingSignOffCapture(ctx, body)
+	case "grooming-questions":
+		raw, err = s.agent.GroomingQuestions(ctx, body)
+	case "grooming-analysis":
+		raw, err = s.agent.GroomingAnalysis(ctx, body)
+	case "dependency-graph":
+		raw, err = s.agent.DependencyGraph(ctx, body)
 	case "implement-step":
 		raw, err = s.agent.ImplementStep(ctx, body)
 	case "qa-validation":
 		raw, err = s.agent.QaValidation(ctx, body)
+	case "architecture-proposal":
+		raw, err = s.agent.ArchitectureProposal(ctx, body)
 	default:
 		return nil, fmt.Errorf("unsupported agent command: %s", command)
 	}

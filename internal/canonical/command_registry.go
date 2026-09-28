@@ -21,6 +21,7 @@ type GateRequirement string
 const (
 	GateStakeholdersConfirmed GateRequirement = "stakeholders-confirmed"
 	GateProductScopeConfirmed GateRequirement = "product-scope-confirmed"
+	GateArchitectureConfirmed GateRequirement = "architecture-confirmed"
 )
 
 // CommandSpec is the Backend-owned contract for an executable command. Agent
@@ -128,7 +129,11 @@ func defaultCommandRegistry() *CommandRegistry {
 		spec("grooming-stakeholder-pack", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
 		spec("grooming-revision", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
 		spec("grooming-sign-off-capture", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
+		spec("grooming-questions", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
+		spec("grooming-analysis", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
+		spec("dependency-graph", CommandModeAgent, "planning", "sdlc-plan", GateProductScopeConfirmed),
 		spec("propose-designs", CommandModeAgent, "architecture", "project-shape", GateProductScopeConfirmed),
+		spec("architecture-proposal", CommandModeAgent, "architecture", "project-shape", GateProductScopeConfirmed),
 		spec("implement-step", CommandModeAgent, "delivery", "ship", GateProductScopeConfirmed),
 		spec("qa-validation", CommandModeAgent, "qa", "ship", GateProductScopeConfirmed),
 	)

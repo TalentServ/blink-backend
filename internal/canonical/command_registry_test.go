@@ -13,7 +13,8 @@ func TestDefaultCommandRegistryIsCompleteAndFailsClosed(t *testing.T) {
 		"technical-plan", "sdlc-start", "sdlc-next", "confirm-product-scope",
 		"confirm-stakeholders", "configure-stakeholders", "grooming-stakeholder-pack",
 		"grooming-revision", "grooming-sign-off-capture", "propose-designs",
-		"implement-step", "qa-validation",
+		"grooming-questions", "grooming-analysis", "dependency-graph",
+		"architecture-proposal", "implement-step", "qa-validation",
 	} {
 		if _, ok := registry.Lookup(command); !ok {
 			t.Fatalf("command %q is missing from the registry", command)
@@ -21,6 +22,21 @@ func TestDefaultCommandRegistryIsCompleteAndFailsClosed(t *testing.T) {
 	}
 	if _, ok := registry.Lookup("not-a-command"); ok {
 		t.Fatal("unknown command must not be resolved")
+	}
+}
+
+func TestGovernedProposalCommandsRemainAgentOnly(t *testing.T) {
+	registry := defaultCommandRegistry()
+	for _, command := range []string{
+		"grooming-questions", "grooming-analysis", "dependency-graph", "architecture-proposal",
+	} {
+		spec, ok := registry.Lookup(command)
+		if !ok {
+			t.Fatalf("%s is not registered", command)
+		}
+		if spec.Mode != CommandModeAgent || spec.ProviderWrites {
+			t.Fatalf("%s must return a proposal without provider write authority", command)
+		}
 	}
 }
 

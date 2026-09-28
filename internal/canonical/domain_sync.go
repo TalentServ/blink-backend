@@ -286,6 +286,19 @@ func computeFrontier(edges []GraphEdge) []string {
 }
 
 func (s *Service) RecomputeGraph(ctx context.Context, projectID int64, wizardState []byte) (*GraphView, error) {
+	// A Framework proposal becomes canonical only through AdoptFrameworkGraph.
+	// Once adopted, wizard compatibility refreshes must not silently replace it.
+	var source string
+	var invalidated *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT source_kind, invalidated_at FROM blink_dependency_graph WHERE project_id=$1
+	`, projectID).Scan(&source, &invalidated)
+	if err == nil && source == "framework" && invalidated == nil {
+		return s.GetGraph(ctx, projectID)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
 	root := parseWizard(wizardState)
 	req, tech := deriveGraphEdges(root)
 	effective := combineEdges(req, tech)
@@ -297,11 +310,12 @@ func (s *Service) RecomputeGraph(ctx context.Context, projectID int64, wizardSta
 		"cycles": cycles, "frontier": frontier, "order": order,
 	})
 	digest := DigestBytes(payload)
-	_, err := s.pool.Exec(ctx, `
+	_, err = s.pool.Exec(ctx, `
 		INSERT INTO blink_dependency_graph (
 			project_id, revision, requirement_edges_json, technical_edges_json, effective_edges_json,
-			graph_digest, cycles_json, frontier_json, execution_order_json, updated_at)
-		VALUES ($1,1,$2,$3,$4,$5,$6,$7,$8,NOW())
+			graph_digest, cycles_json, frontier_json, execution_order_json, source_kind, source_run_id,
+			adopted_at, invalidated_at, invalidation_reason, updated_at)
+		VALUES ($1,1,$2,$3,$4,$5,$6,$7,$8,'wizard-derived',NULL,NULL,NULL,NULL,NOW())
 		ON CONFLICT (project_id) DO UPDATE SET
 			revision = blink_dependency_graph.revision + 1,
 			requirement_edges_json = EXCLUDED.requirement_edges_json,
@@ -311,6 +325,11 @@ func (s *Service) RecomputeGraph(ctx context.Context, projectID int64, wizardSta
 			cycles_json = EXCLUDED.cycles_json,
 			frontier_json = EXCLUDED.frontier_json,
 			execution_order_json = EXCLUDED.execution_order_json,
+			source_kind = 'wizard-derived',
+			source_run_id = NULL,
+			adopted_at = NULL,
+			invalidated_at = NULL,
+			invalidation_reason = NULL,
 			updated_at = NOW()
 	`, projectID, mustJSON(req), mustJSON(tech), mustJSON(effective), digest, mustJSON(cycles), mustJSON(frontier), mustJSON(order))
 	if err != nil {

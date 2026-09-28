@@ -32,6 +32,13 @@ func (g *Gates) Require(ctx context.Context, projectID int64, requirements []Gat
 			`, projectID).Scan(&confirmed); err != nil && err != pgx.ErrNoRows {
 				return err
 			}
+		case GateArchitectureConfirmed:
+			if err := g.pool.QueryRow(ctx, `
+				SELECT confirmed_digest FROM blink_architecture_snapshot
+				WHERE project_id=$1 AND invalidated_at IS NULL
+			`, projectID).Scan(&confirmed); err != nil && err != pgx.ErrNoRows {
+				return err
+			}
 		default:
 			return fmt.Errorf("unknown gate requirement: %s", requirement)
 		}
@@ -271,6 +278,16 @@ func (g *Gates) LoadBlockers(ctx context.Context, projectID int64, elig Eligibil
 			"code":    "shape-unconfirmed",
 			"message": "Confirm project shape before repositories and work plan.",
 			"step":    "project-shape",
+		})
+	}
+	var architectureConfirmed *string
+	_ = g.pool.QueryRow(ctx, `
+		SELECT confirmed_digest FROM blink_architecture_snapshot
+		WHERE project_id=$1 AND invalidated_at IS NULL
+	`, projectID).Scan(&architectureConfirmed)
+	if elig.CompletedIndex >= indexForStep("project-shape") && (architectureConfirmed == nil || *architectureConfirmed == "") {
+		blockers = append(blockers, map[string]any{
+			"code": "architecture-unconfirmed", "message": "Confirm the architecture snapshot before governed execution.", "step": "project-shape",
 		})
 	}
 	var planConfirmed *string
