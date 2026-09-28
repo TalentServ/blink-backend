@@ -26,6 +26,19 @@ type Client struct {
 	lambda       *lambda.Client
 }
 
+type requestedModelContextKey struct{}
+
+// WithRequestedModel attaches a validated, non-secret model preference to an
+// incoming Blink request. Invoke and CommandStream forward it to the runtime.
+func WithRequestedModel(ctx context.Context, model string) context.Context {
+	return context.WithValue(ctx, requestedModelContextKey{}, model)
+}
+
+func requestedModel(ctx context.Context) string {
+	model, _ := ctx.Value(requestedModelContextKey{}).(string)
+	return strings.TrimSpace(model)
+}
+
 func New(cfg config.Config) *Client {
 	return &Client{
 		cfg: cfg,
@@ -46,6 +59,14 @@ func New(cfg config.Config) *Client {
 func (c *Client) Invoke(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
 	if strings.TrimSpace(c.cfg.AgentRuntimeToken) == "" {
 		return nil, fmt.Errorf("BLINK_AGENT_RUNTIME_TOKEN is not configured")
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	if model := requestedModel(ctx); model != "" {
+		if _, supplied := payload["model"]; !supplied {
+			payload["model"] = model
+		}
 	}
 	if shouldInvokeLambda(c.cfg, c.cfg.AgentRuntimeURL) {
 		return c.invokeLambda(ctx, payload)
@@ -414,6 +435,11 @@ func (c *Client) CommandStream(ctx context.Context, payload map[string]any, onTh
 	}
 	if payload == nil {
 		payload = map[string]any{}
+	}
+	if model := requestedModel(ctx); model != "" {
+		if _, supplied := payload["model"]; !supplied {
+			payload["model"] = model
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
