@@ -71,6 +71,7 @@ blink:
   figma-redirect-uri: ${BLINK_FIGMA_REDIRECT_URI:}
   figma-scopes: "${BLINK_FIGMA_SCOPES:current_user:read,file_content:read,file_metadata:read}"
   figma-webhook-public-base: ${BLINK_FIGMA_WEBHOOK_PUBLIC_BASE:}
+  stitch-api-key: ${STITCH_API_KEY:}
   integration-secret-key: ${BLINK_INTEGRATION_SECRET_KEY:}
   smtp-host: ${BLINK_SMTP_HOST:}
   smtp-port: ${BLINK_SMTP_PORT:587}

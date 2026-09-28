@@ -215,7 +215,7 @@ func (s *Service) ingestLoaded(w http.ResponseWriter, r *http.Request, projectID
 	if len(changes) == 0 && versionChanged {
 		changes = markLinkedScreens(screens, "changed in Figma")
 	}
-	screens = s.fillFigmaThumbnails(r, token, fileKey, screens, versionChanged || len(changes) > 0)
+	screens = s.fillFigmaThumbnails(r, token, fileKey, screens, false)
 	row := existing
 	row.ProjectID = projectID
 	row.FileKey = fileKey
@@ -267,6 +267,12 @@ func (s *Service) FigmaWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "message": "Unknown webhook passcode."})
 		return
 	}
+	if row, ok := s.loadFigmaDesign(r, projectID, fileKey); ok {
+		if synced, err := time.Parse(time.RFC3339, row.LastSyncedAt); err == nil && time.Since(synced) < 3*time.Minute {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "message": "Figma update already applied."})
+			return
+		}
+	}
 	stored, ok := s.load(r.Context(), projectID, "figma")
 	if !ok || strings.TrimSpace(stored.AccessToken) == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ignored", "message": "Figma is not connected."})
@@ -282,6 +288,9 @@ func (s *Service) FigmaWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readFigmaFile(r *http.Request, token, fileKey string) (string, string, []figmaScreen, error) {
+	if err := noteFigmaRead(); err != nil {
+		return "", "", nil, err
+	}
 	rawURL := "https://api.figma.com/v1/files/" + fileKey + "?depth=5"
 	headers := figmaHeaders(token)
 	status, body, err := s.doLarge(r, http.MethodGet, rawURL, headers)
@@ -442,6 +451,7 @@ func (row figmaDesignRow) response(changes, updates []any) map[string]any {
 		"webhookId": row.WebhookID, "webhookStatus": row.WebhookStatus,
 		"lastSyncedAt": row.LastSyncedAt, "lastSyncSummary": row.LastSyncSummary,
 		"markdown": "", "screens": screens, "changes": changes, "jiraUpdates": updates,
+		"figmaUsage": figmaUsageSnapshot(),
 	}
 }
 

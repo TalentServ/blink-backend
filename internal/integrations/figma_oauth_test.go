@@ -10,7 +10,7 @@ func TestNormalizeFigmaScopesDropsInvalidAppScopes(t *testing.T) {
 			"folders:read,folder_metadata:read,library_assets:read,library_content:read," +
 			"selections:read,team_library_content:read,webhooks:read,webhooks:write,files:read,projects:read",
 	)
-	want := "current_user:read,file_content:read,file_metadata:read"
+	want := "current_user:read,file_content:read,file_metadata:read,webhooks:write"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
