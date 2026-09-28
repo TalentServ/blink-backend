@@ -43,7 +43,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: cfg.CORSOrigins,
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-Blink-AI-Model"},
 		ExposedHeaders: []string{
 			"Content-Disposition",
 			"X-Blink-Stakeholder-Source",
@@ -100,6 +100,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 
 		api.Group(func(pr chi.Router) {
 			pr.Use(s.requireAuth)
+			pr.Use(s.aiModelPreference)
 
 			pr.Get("/db-status", s.dbStatus)
 			pr.Get("/stakeholder-roles", s.stakeholderRoles)
@@ -192,6 +193,22 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 	})
 
 	return r
+}
+
+func (s *Server) aiModelPreference(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawModel := r.Header.Get("X-Blink-AI-Model")
+		if strings.TrimSpace(rawModel) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		model, err := chat.NormalizeModel(rawModel)
+		if err != nil {
+			writeErr(w, badRequest(err.Error()))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(agent.WithRequestedModel(r.Context(), model)))
+	})
 }
 
 type ctxKey string

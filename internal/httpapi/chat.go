@@ -39,7 +39,7 @@ func (s *Server) getProjectChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"thread":   thread,
 		"messages": msgs,
-		"models":   []string{"gpt-5.6-luna", "terra", "sol"},
+		"models":   []string{"gpt-5.6-luna", "terra", "sol", "gemini-3.8-flash", "gemini-3.5-flash-lite"},
 	})
 }
 
@@ -281,9 +281,9 @@ func (s *Server) streamChatTurn(
 		return
 	}
 	_ = writeSSE("message_done", map[string]any{
-		"turnId":    turnID,
-		"message":   assistantMsg,
-		"user":      userMsg,
+		"turnId":  turnID,
+		"message": assistantMsg,
+		"user":    userMsg,
 	})
 }
 
