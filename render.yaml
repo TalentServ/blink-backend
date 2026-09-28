@@ -35,7 +35,7 @@ services:
       - key: BLINK_FIGMA_CLIENT_SECRET
         sync: false
       - key: BLINK_FIGMA_SCOPES
-        value: current_user:read,file_content:read,file_metadata:read,webhooks:write,mcp:connect
+        value: current_user:read,file_content:read,file_metadata:read,webhooks:write
       - key: STITCH_API_KEY
         sync: false
       - key: AWS_ACCESS_KEY_ID
