@@ -102,12 +102,12 @@ func Load() (Config, error) {
 		JiraClientID:     os.Getenv("BLINK_JIRA_CLIENT_ID"),
 		JiraClientSecret: os.Getenv("BLINK_JIRA_CLIENT_SECRET"),
 		JiraRedirectURI:  os.Getenv("BLINK_JIRA_REDIRECT_URI"),
-		JiraScopes:       env("BLINK_JIRA_SCOPES", "read:jira-work write:jira-work read:jira-user read:me offline_access"),
+		JiraScopes:       env("BLINK_JIRA_SCOPES", "read:jira-work read:jira-user read:me offline_access"),
 
 		GitHubClientID:     os.Getenv("BLINK_GITHUB_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("BLINK_GITHUB_CLIENT_SECRET"),
 		GitHubRedirectURI:  os.Getenv("BLINK_GITHUB_REDIRECT_URI"),
-		GitHubScopes:       env("BLINK_GITHUB_SCOPES", "repo read:org user:email"),
+		GitHubScopes:       env("BLINK_GITHUB_SCOPES", "read:org user:email"),
 
 		FigmaClientID:     os.Getenv("BLINK_FIGMA_CLIENT_ID"),
 		FigmaClientSecret: os.Getenv("BLINK_FIGMA_CLIENT_SECRET"),

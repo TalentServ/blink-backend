@@ -101,3 +101,28 @@ func TestCommitFilesEmptyRepoErrorMessageIs409(t *testing.T) {
 		t.Fatal("404 missing ref is still a missing-branch bootstrap")
 	}
 }
+
+func TestCurrentUserLoginResolvesPersonalRepositoryOwner(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "calculator-owner"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := New("token")
+	c.baseURL = srv.URL
+	login, err := c.CurrentUserLogin(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentUserLogin: %v", err)
+	}
+	if login != "calculator-owner" {
+		t.Fatalf("CurrentUserLogin = %q, want calculator-owner", login)
+	}
+}

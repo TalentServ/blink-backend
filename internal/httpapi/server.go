@@ -132,12 +132,12 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 				prr.Post("/{id}/grooming-stakeholder-pack", s.groomingStakeholderPack)
 				prr.Post("/{id}/grooming-revision", s.groomingRevision)
 				prr.Post("/{id}/grooming-sign-off-capture", s.groomingSignOffCapture)
-				prr.Post("/{id}/git-apply", s.gitApply)
-				prr.Post("/{id}/implement-step", s.implementStepApply)
+				prr.Post("/{id}/git-apply", manualProviderAction("Commit the workspace guidance locally, then run the framework readiness refresh before returning to Blink."))
+				prr.Post("/{id}/implement-step", manualProviderAction("Use the generated Cursor handoff for local implementation. Blink does not create branches, commits, or pull requests."))
 				prr.Post("/{id}/qa-validation", s.qaValidation)
 				prr.Post("/{id}/sdlc-start", s.sdlcStart)
 				prr.Post("/{id}/sdlc-next", s.sdlcNext)
-				prr.Post("/{id}/jira-gate-evidence", s.jiraGateEvidence)
+				prr.Post("/{id}/jira-gate-evidence", manualProviderAction("Record gates through the framework. If Jira evidence is needed, post it manually from the provider."))
 				prr.Post("/{id}/setup", s.setupProject)
 				prr.Post("/{id}/download", s.downloadProject)
 				prr.Get("/{id}/chat", s.getProjectChat)
@@ -149,7 +149,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 			pr.Route("/integrations", func(ir chi.Router) {
 				ir.Get("/", s.integ.ListMine)
 				ir.Post("/connect", s.integ.Connect)
-				ir.Post("/repositories", s.integ.CreateRepositories)
+				ir.Post("/repositories", manualProviderAction("Create repositories manually in GitHub, then return their URLs to Blink for framework reconciliation."))
 				ir.Get("/jira/oauth/url", s.integ.JiraOAuthURL)
 				ir.Post("/jira/oauth/exchange", s.integ.JiraOAuthExchange)
 				ir.Get("/github/oauth/url", s.integ.GitHubOAuthURL)
@@ -168,13 +168,13 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 				ir.Post("/figma/ingest", s.integ.IngestFigmaDesign)
 				ir.Post("/figma/sync", s.integ.IngestFigmaDesign)
 				ir.Post("/stitch/designs", s.integ.ProposeStitchDesigns)
-				ir.Post("/jira/issues", s.integ.CreateJiraIssues)
-				ir.Post("/jira/issues/delete", s.integ.DeleteJiraIssues)
+				ir.Post("/jira/issues", manualProviderAction("Create Jira issues manually. Blink can retain the proposed epic and story details as a draft."))
+				ir.Post("/jira/issues/delete", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
 				ir.Post("/jira/issues/statuses", s.integ.JiraIssueStatuses)
-				ir.Post("/jira/issues/transition", s.integ.TransitionJiraIssue)
-				ir.Post("/jira/comments", s.integ.CreateJiraComment)
+				ir.Post("/jira/issues/transition", manualProviderAction("Change Jira issue status manually in Jira. Blink does not transition provider records."))
+				ir.Post("/jira/comments", manualProviderAction("Post Jira comments manually in Jira. Blink does not write provider comments."))
 				ir.Post("/jira/comments/poll", s.integ.PollJiraComments)
-				ir.Post("/jira/comments/reset-simulated", s.integ.ResetSimulatedJiraReplies)
+				ir.Post("/jira/comments/reset-simulated", manualProviderAction("Remove simulated Jira replies manually in Jira. Blink does not delete provider comments."))
 				ir.Post("/jira/discussions/summarize", s.summarizeDiscussion)
 				ir.Post("/binding", s.integ.Binding)
 			})
@@ -186,8 +186,8 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 			})
 			pr.Route("/dev/jira/issues", func(dr chi.Router) {
 				dr.Get("/", s.integ.ListBlinkIssues)
-				dr.Delete("/", s.integ.DeleteAllBlinkIssues)
-				dr.Delete("/{issueKey}", s.integ.DeleteBlinkIssue)
+				dr.Delete("/", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
+				dr.Delete("/{issueKey}", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
 			})
 		})
 	})
@@ -218,6 +218,17 @@ func sessionEmail(r *http.Request) string {
 		return v.Email
 	}
 	return ""
+}
+
+func manualProviderAction(instructions string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"status":       "manual_action_required",
+			"message":      "Blink does not perform external provider mutations. " + instructions,
+			"instructions": instructions,
+			"errors":       []string{"manual_provider_action_required"},
+		})
+	}
 }
 
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {

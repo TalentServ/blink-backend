@@ -1,27 +1,17 @@
 # blink-backend
 
-Java 25 / Spring Boot 4.1.0 API for the `blink_demo` wizard. It persists the first two screens to Render Postgres and builds the download zip on the requirements screen.
+The Go API for the `blink_demo` wizard. The Dockerfile builds `cmd/server`, which is the only supported Blink backend runtime.
 
-## What the 3 screens do
+> `src/main/java` and `pom.xml` are frozen legacy code. Do not run, deploy, or add features to the Java implementation. They are retained temporarily for reference only and are not a parity target.
 
-1. **Welcome** — user picks New or Existing. That value is sent with the project on the next screen.
-2. **Project & Stakeholders** — **Save & Continue** `POST`/`PUT`s the project and, when S3 is configured, creates `<slug>_<id>_workspace/` in the bucket and copies the AI-SDLC kit into it.
-3. **Download Project** — runs `setup-new-workspace` apply, writes `requirement.md` and `.cursor/` into the same S3 workspace, then zips the kit **from local disk** (does not wait for the full S3 copy).
+Blink does not create repositories, commits, branches, pull requests, Jira issues, Jira comments, Jira transitions, merge changes, or deployments. It provides workflow guidance and manual handoffs; external provider actions remain human-owned.
 
 ## Run locally
 
-JDK 25 is required. This repo includes the Maven Wrapper, so you do not need a global `mvn` install.
-
-**Local without a database:** set `SPRING_PROFILES_ACTIVE=nodb` in `.env`. Projects are saved to `.blink-nodb.json` in this folder (gitignored) so they survive a Java restart. Grooming and download still work. Full workspace setup also requires Python 3; on Windows set `BLINK_CANONICAL_SETUP_PYTHON=python` when `python3` is unavailable.
-
-**Production / Render must not set `SPRING_PROFILES_ACTIVE=nodb`.** Use Postgres (`DATABASE_URL`). Always set `BLINK_AGENT_RUNTIME_TOKEN` to the Worker `AGENT_SERVICE_TOKEN`. `.env` is gitignored.
+Go and Postgres are required. Copy `.env.example` when present, configure `DATABASE_URL`, and provide `BLINK_AGENT_RUNTIME_TOKEN` for the agent runtime. `.env` is gitignored.
 
 ```powershell
-Copy-Item .env.example .env
-# edit .env: BLINK_AGENT_RUNTIME_TOKEN (and keep SPRING_PROFILES_ACTIVE=nodb)
-# S3 keys are optional locally; without them Save still works, S3 copy is skipped
-$env:JAVA_HOME = "$env:USERPROFILE\tools\jdk-25"
-.\mvnw.cmd spring-boot:run
+go run ./cmd/server
 ```
 
 The API listens on `http://localhost:8090`. Vite proxies `/api` to that local port.
@@ -33,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. `.env.development` already sets `VITE_API_URL=/api` so the wizard talks to local Java, not Render.
+Open `http://127.0.0.1:5173`. `.env.development` sets `VITE_API_URL=/api` so the wizard talks to the local Go API.
 
 ### Local Python Agent Runtime (optional)
 
@@ -50,10 +40,10 @@ Then in `blink-backend/.env`:
 
 ```
 BLINK_AGENT_RUNTIME_URL=http://127.0.0.1:8787
-BLINK_AGENT_RUNTIME_TOKEN=blink-groom-2026
+BLINK_AGENT_RUNTIME_TOKEN=your-local-agent-token
 ```
 
-Restart Java after changing `.env`.
+Restart the Go API after changing `.env`.
 
 ## Deploy on Render
 
@@ -73,9 +63,9 @@ The GitHub repo `blink-backend` already *is* the API. The `Dockerfile` sits at t
 
 | Key | Value |
 | --- | --- |
-| `DATABASE_URL` | **Required.** Link the existing Postgres service, or paste the **Internal** Database URL. Without this the API tries `localhost` and Hibernate fails. **Do not set `SPRING_PROFILES_ACTIVE=nodb` here.** |
+| `DATABASE_URL` | **Required.** Link the existing Postgres service or paste its internal URL. The Go API applies its own migrations at startup. |
 | `BLINK_AGENT_RUNTIME_URL` | `https://z5i3yybrx1.execute-api.us-west-2.amazonaws.com` (AWS Lambda endpoint; defaults to this if omitted) |
-| `BLINK_AGENT_RUNTIME_TOKEN` | `blink-groom-2026` (defaults to this if omitted) |
+| `BLINK_AGENT_RUNTIME_TOKEN` | **Required in production.** Set a rotated runtime token; never use the legacy development value. |
 | `BLINK_AUTOMATION_SDLC_GIT_URL` | `https://github.com/AtulTalentServ/automation_sdlc.git` (Docker image includes git so the kit can be cloned when `/app/automation_sdlc` is empty) |
 | `BLINK_CORS_ORIGINS` | `https://YOUR-FRONTEND.onrender.com` (add after the static site exists; you can also keep `http://localhost:5173`) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **Required for S3 workspaces.** Save & Continue copies the kit to `<slug>_<id>_workspace/`. |
@@ -117,29 +107,17 @@ On the **backend** service set:
 
 Use the **External Database URL** from the Render dashboard when this API runs on your machine.
 
-The API converts `DATABASE_URL=postgres://...` into JDBC and turns on `sslmode=require` for `*.render.com` hosts.
+The Go API accepts a PostgreSQL connection URL directly.
 
-If you prefer explicit properties:
+Example:
 
 ```
-SPRING_DATASOURCE_URL=jdbc:postgresql://HOST:5432/DATABASE?sslmode=require
-SPRING_DATASOURCE_USERNAME=...
-SPRING_DATASOURCE_PASSWORD=...
+DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
 ```
 
-On first boot Hibernate `ddl-auto=update` will:
+The Go API runs its tracked database migrations at startup. Do not use the legacy Java `src/main/resources` schema or Spring/Hibernate environment variables.
 
-- leave existing `users`, `project`, and `stakeholder_roles` in place
-- add `project.project_type` if it is missing
-- create `stakeholder` if it is missing
-- seed a demo user (`blink.system@talentserv.com`) for `created_by`
-- seed the wizard roles (`po`, `ba`, `sa`, `tl`, `sc`, `qa`, `devops`) when those `role_code`s are absent
-
-You can also apply `src/main/resources/db/extra-schema.sql` yourself in the Render SQL console.
-
-Set `SPRING_JPA_DDL_AUTO=none` after the schema is stable if you do not want Hibernate to alter tables.
-
-## Stakeholder emails and Jira comments
+## Stakeholder emails and Jira
 
 **Gmail OAuth (recommended on Render)** — one mailbox sends login OTPs and stakeholder mail over HTTPS. Sign-in codes are sent only to `@talentserv.co.in`.
 
@@ -170,7 +148,7 @@ Testing-mode Google apps issue refresh tokens that expire after 7 days. Publish 
 | `BLINK_SMTP_START_TLS` | Default `true` |
 | `BLINK_SMTP_OUTBOX_DIR` | When neither Gmail nor SMTP is set, write `.txt` files here (default `.blink-outbox`) |
 
-**Jira** — after epics/stories exist, `POST /api/integrations/jira/comments` posts a clarification comment with `<!-- blink-question:{id} -->`. `POST /api/integrations/jira/comments/poll` returns the next reply after that marker that is not from Blink’s posting account. OAuth already requests `write:jira-work`.
+**Jira** — Blink may read connected Jira data. Creating issues, comments, transitions, and deletions are manual provider actions; the hosted API rejects those writes.
 
 ## API
 

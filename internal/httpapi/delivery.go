@@ -65,6 +65,16 @@ func pickWorkspaceRepo(org string, repos []repoRef, explicit string) (owner, rep
 	return "", "", fmt.Errorf("no *-workspace repository found; pass workspaceRepo or create one first")
 }
 
+// pickWorkspaceRepoWithPersonalOwner handles repositories created through
+// GitHub's /user/repos endpoint, where no organization is configured.
+func pickWorkspaceRepoWithPersonalOwner(org, personalOwner string, repos []repoRef, explicit string) (owner, repo string, err error) {
+	owner, repo, err = pickWorkspaceRepo(org, repos, explicit)
+	if err == nil || strings.TrimSpace(org) != "" || strings.TrimSpace(personalOwner) == "" {
+		return owner, repo, err
+	}
+	return pickWorkspaceRepo(personalOwner, repos, explicit)
+}
+
 func pickAppRepos(org string, repos []repoRef) []struct{ Owner, Repo, Kind string } {
 	var out []struct{ Owner, Repo, Kind string }
 	for _, r := range repos {
@@ -149,7 +159,12 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	owner, repo, err := pickWorkspaceRepo(org, body.Repositories, body.WorkspaceRepo)
+	gh := githubgit.New(token)
+	personalOwner := ""
+	if strings.TrimSpace(org) == "" {
+		personalOwner, _ = gh.CurrentUserLogin(r.Context())
+	}
+	owner, repo, err := pickWorkspaceRepoWithPersonalOwner(org, personalOwner, body.Repositories, body.WorkspaceRepo)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": err.Error(), "errors": []string{"workspace_repo_missing"}})
 		return
@@ -158,13 +173,12 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "chore(blink): apply AI-SDLC workspace overlay"
 	}
-	gh := githubgit.New(token)
 	result, err := gh.CommitFiles(r.Context(), owner, repo, "", msg, files)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"status":  "error",
-			"message": "Git apply failed (fail closed): " + err.Error(),
-			"errors":  []string{"git_apply_failed"},
+			"status":     "error",
+			"message":    "Git apply failed (fail closed): " + err.Error(),
+			"errors":     []string{"git_apply_failed"},
 			"gitWritten": false,
 		})
 		return
@@ -362,14 +376,14 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":        "ok",
-		"message":       fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs)),
-		"implementStep": impl,
+		"status":            "ok",
+		"message":           fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs)),
+		"implementStep":     impl,
 		"draftPullRequests": prs,
-		"issueId":       issueID,
-		"nextCommand":   "/qa-validation",
-		"overlayFiles":  agent["overlayFiles"],
-		"evidence":      evidence,
+		"issueId":           issueID,
+		"nextCommand":       "/qa-validation",
+		"overlayFiles":      agent["overlayFiles"],
+		"evidence":          evidence,
 	})
 }
 

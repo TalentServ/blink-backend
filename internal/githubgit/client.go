@@ -132,6 +132,28 @@ func (c *Client) DefaultBranch(ctx context.Context, owner, repo string) (string,
 	return branch, nil
 }
 
+// CurrentUserLogin resolves the owner for repositories created under the
+// authenticated user's personal GitHub account.
+func (c *Client) CurrentUserLogin(ctx context.Context) (string, error) {
+	status, raw, err := c.do(ctx, http.MethodGet, "/user", nil)
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", fmt.Errorf("GitHub current-user lookup HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var user struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(raw, &user); err != nil {
+		return "", fmt.Errorf("decode GitHub current user: %w", err)
+	}
+	if strings.TrimSpace(user.Login) == "" {
+		return "", fmt.Errorf("GitHub current-user response has no login")
+	}
+	return strings.TrimSpace(user.Login), nil
+}
+
 func (c *Client) CommitFiles(ctx context.Context, owner, repo, branch, message string, files []File) (*CommitResult, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no files to commit")
