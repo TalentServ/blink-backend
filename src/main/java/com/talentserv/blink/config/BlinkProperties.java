@@ -82,6 +82,7 @@ public class BlinkProperties {
      * Localhost is skipped because Figma cannot reach it.
      */
     private String figmaWebhookPublicBase = "";
+    private String stitchApiKey = "";
     /**
      * Passphrase used to derive the AES key for per-project GitHub/Jira tokens.
      */
@@ -350,6 +351,14 @@ public class BlinkProperties {
 
     public void setFigmaWebhookPublicBase(String figmaWebhookPublicBase) {
         this.figmaWebhookPublicBase = figmaWebhookPublicBase;
+    }
+
+    public String getStitchApiKey() {
+        return stitchApiKey;
+    }
+
+    public void setStitchApiKey(String stitchApiKey) {
+        this.stitchApiKey = stitchApiKey;
     }
 
     public String getIntegrationSecretKey() {
