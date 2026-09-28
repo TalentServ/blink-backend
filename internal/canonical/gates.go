@@ -3,8 +3,10 @@ package canonical
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -13,6 +15,32 @@ type Gates struct {
 }
 
 func NewGates(pool *pgxpool.Pool) *Gates { return &Gates{pool: pool} }
+
+func (g *Gates) Require(ctx context.Context, projectID int64, requirements []GateRequirement) error {
+	for _, requirement := range requirements {
+		var confirmed *string
+		switch requirement {
+		case GateStakeholdersConfirmed:
+			if err := g.pool.QueryRow(ctx, `
+				SELECT confirmed_digest FROM blink_stakeholder_registry WHERE project_id=$1
+			`, projectID).Scan(&confirmed); err != nil && err != pgx.ErrNoRows {
+				return err
+			}
+		case GateProductScopeConfirmed:
+			if err := g.pool.QueryRow(ctx, `
+				SELECT confirmed_digest FROM blink_product_scope_gate WHERE project_id=$1
+			`, projectID).Scan(&confirmed); err != nil && err != pgx.ErrNoRows {
+				return err
+			}
+		default:
+			return fmt.Errorf("unknown gate requirement: %s", requirement)
+		}
+		if confirmed == nil || *confirmed == "" {
+			return fmt.Errorf("required gate is not confirmed: %s", requirement)
+		}
+	}
+	return nil
+}
 
 func (g *Gates) RecordStakeholderConfirmation(ctx context.Context, projectID int64, assignments any, registryDigest, actorEmail string) error {
 	raw, _ := json.Marshal(assignments)

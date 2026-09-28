@@ -103,11 +103,13 @@ func (s *Server) confirmProductScope(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
-	raw, err := s.agent.ConfirmProductScope(r.Context(), payload)
-	if err == nil {
-		s.afterProductScopeConfirm(r.Context(), id, sessionEmail(r), body, raw)
+	raw, err := s.executeCanonicalCompatibility(r, id, "confirm-product-scope", payload)
+	if err != nil {
+		writeErr(w, err)
+		return
 	}
-	s.writeAgentResult(w, r, p.ProjectName, id, "confirm-product-scope", raw, err)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) classifyWork(w http.ResponseWriter, r *http.Request) {
@@ -229,11 +231,13 @@ func (s *Server) sdlcStart(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
-	raw, err := s.agent.SdlcStart(r.Context(), payload)
-	if err == nil {
-		s.afterSdlcStart(r.Context(), id, raw)
+	raw, err := s.executeCanonicalCompatibility(r, id, "sdlc-start", payload)
+	if err != nil {
+		writeErr(w, err)
+		return
 	}
-	s.writeAgentResult(w, r, p.ProjectName, id, "sdlc-start", raw, err)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) sdlcNext(w http.ResponseWriter, r *http.Request) {

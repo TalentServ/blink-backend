@@ -518,11 +518,13 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	payload["stakeholders"] = stakes
-	raw, err := s.agent.ConfirmStakeholders(r.Context(), payload)
-	if err == nil {
-		s.afterStakeholderConfirm(r.Context(), id, sessionEmail(r), stakes, raw)
+	raw, err := s.executeCanonicalCompatibility(r, id, "confirm-stakeholders", payload)
+	if err != nil {
+		writeErr(w, err)
+		return
 	}
-	s.writeAgentResult(w, r, p.ProjectName, id, "confirm-stakeholders", raw, err)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) planProductScopeID(w http.ResponseWriter, r *http.Request) {
