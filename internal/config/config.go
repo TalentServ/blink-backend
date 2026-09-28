@@ -112,7 +112,7 @@ func Load() (Config, error) {
 		FigmaClientID:     os.Getenv("BLINK_FIGMA_CLIENT_ID"),
 		FigmaClientSecret: os.Getenv("BLINK_FIGMA_CLIENT_SECRET"),
 		FigmaRedirectURI:  os.Getenv("BLINK_FIGMA_REDIRECT_URI"),
-		FigmaScopes:       env("BLINK_FIGMA_SCOPES", "current_user:read,file_content:read,file_metadata:read"),
+		FigmaScopes:       env("BLINK_FIGMA_SCOPES", "current_user:read,file_content:read,file_metadata:read,webhooks:write,mcp:connect"),
 		StitchAPIKey:      os.Getenv("STITCH_API_KEY"),
 
 		IntegrationSecretKey: os.Getenv("BLINK_INTEGRATION_SECRET_KEY"),

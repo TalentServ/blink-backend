@@ -10,6 +10,7 @@ bin/
 .env
 .blink-nodb.json
 .blink-stitch-media/
+.blink-figma-usage.json
 .blink-integrations.json
 .blink-outbox/
 .DS_Store

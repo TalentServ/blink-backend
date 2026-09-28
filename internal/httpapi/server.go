@@ -168,6 +168,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, agentC
 				ir.Post("/figma/ingest", s.integ.IngestFigmaDesign)
 				ir.Post("/figma/sync", s.integ.IngestFigmaDesign)
 				ir.Post("/stitch/designs", s.integ.ProposeStitchDesigns)
+				ir.Post("/stitch/designs/choose", s.integ.ChooseStitchDesign)
 				ir.Post("/jira/issues", manualProviderAction("Create Jira issues manually. Blink can retain the proposed epic and story details as a draft."))
 				ir.Post("/jira/issues/delete", manualProviderAction("Delete Jira issues manually in Jira. Blink does not delete provider records."))
 				ir.Post("/jira/issues/statuses", s.integ.JiraIssueStatuses)
