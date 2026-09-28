@@ -13,12 +13,12 @@ import (
 )
 
 var AllowedModels = map[string]string{
-	"gpt-5.6-luna":          "gpt-5.6-luna",
-	"luna":                  "gpt-5.6-luna",
-	"terra":                 "gpt-5.6-terra",
-	"gpt-5.6-terra":         "gpt-5.6-terra",
-	"sol":                   "gpt-5.6-sol",
-	"gpt-5.6-sol":           "gpt-5.6-sol",
+	"gpt-5.6-luna":  "gpt-5.6-luna",
+	"luna":          "gpt-5.6-luna",
+	"terra":         "gpt-5.6-terra",
+	"gpt-5.6-terra": "gpt-5.6-terra",
+	"sol":           "gpt-5.6-sol",
+	"gpt-5.6-sol":   "gpt-5.6-sol",
 	"gemini-3.8-flash":      "gemini-3.8-flash",
 	"gemini-3.5-flash-lite": "gemini-3.5-flash-lite",
 }

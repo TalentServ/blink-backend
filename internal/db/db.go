@@ -29,6 +29,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		{"migrations/003_user_integrations.sql", "./migrations/003_user_integrations.sql"},
 		{"migrations/004_chat.sql", "./migrations/004_chat.sql"},
 		{"migrations/005_figma_design.sql", "./migrations/005_figma_design.sql"},
+		{"migrations/006_canonical_foundation.sql", "./migrations/006_canonical_foundation.sql"},
+		{"migrations/007_canonical_gates.sql", "./migrations/007_canonical_gates.sql"},
+		{"migrations/008_grooming_requirements.sql", "./migrations/008_grooming_requirements.sql"},
+		{"migrations/009_repos_graph_ship.sql", "./migrations/009_repos_graph_ship.sql"},
 	}
 	for _, candidates := range files {
 		body, path, err := readFirst(candidates)

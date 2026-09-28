@@ -28,10 +28,11 @@ var (
 )
 
 type Service struct {
-	pool *pgxpool.Pool
-	cfg  config.Config
-	box  *crypto.Box
-	http *http.Client
+	pool              *pgxpool.Pool
+	cfg               config.Config
+	box               *crypto.Box
+	http              *http.Client
+	projectionEnqueue projectionEnqueueFunc
 }
 
 func New(pool *pgxpool.Pool, cfg config.Config, box *crypto.Box) *Service {
@@ -204,6 +205,21 @@ func (s *Service) CreateRepositories(w http.ResponseWriter, r *http.Request) {
 		default:
 			results = append(results, map[string]any{
 				"name": name, "status": "failed", "htmlUrl": "", "message": fmt.Sprintf("GitHub HTTP %d", status),
+			})
+		}
+	}
+	projectID := parseID(req.ProjectID)
+	if projectID > 0 {
+		created := 0
+		for _, row := range results {
+			if str(row["status"]) == "created" || str(row["status"]) == "exists" {
+				created++
+			}
+		}
+		if created > 0 {
+			s.recordProjection(r.Context(), projectID, "github", "repositories.create", map[string]any{
+				"organization": org,
+				"repositories": results,
 			})
 		}
 	}
@@ -795,6 +811,14 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 		_ = writeSSE("done", result)
 		return
 	}
+	if projectID > 0 && ok > 0 {
+		s.recordProjection(r.Context(), projectID, "jira", "issues.create", map[string]any{
+			"projectKey": projectKey,
+			"created":    ok,
+			"total":      total,
+			"status":     status,
+		})
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -883,6 +907,12 @@ func (s *Service) DeleteJiraIssues(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadGateway
 		msg = strings.Join(errs, " ")
 	}
+	if projectID > 0 && len(deleted) > 0 {
+		s.recordProjection(r.Context(), projectID, "jira", "issues.delete", map[string]any{
+			"deletedKeys": deleted,
+			"count":       len(deleted),
+		})
+	}
 	writeJSON(w, status, map[string]any{
 		"deleted":      len(deleted),
 		"skipped":      0,
@@ -950,6 +980,14 @@ func (s *Service) CreateJiraComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	commentID := firstNonEmpty(jsonText(resp, "id"), fmt.Sprintf("%v", jsonRaw(resp, "id")))
+	projectID := parseID(req.ProjectID)
+	if projectID > 0 {
+		s.recordProjection(r.Context(), projectID, "jira", "comment.create", map[string]any{
+			"issueKey":        issueKey,
+			"commentId":       commentID,
+			"blinkQuestionId": qid,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok", "message": "Comment posted on " + issueKey,
 		"issueKey": issueKey, "commentId": commentID, "blinkQuestionId": qid,

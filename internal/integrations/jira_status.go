@@ -97,6 +97,13 @@ func (s *Service) TransitionJiraIssue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if projectID > 0 {
+		s.recordProjection(r.Context(), projectID, "jira", "issue.transition", map[string]any{
+			"issueKey": issueKey,
+			"target":   target,
+			"status":   updated,
+		})
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
