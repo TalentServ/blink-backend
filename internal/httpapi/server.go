@@ -207,8 +207,8 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 			})
 			pr.Route("/dev/jira/issues", func(dr chi.Router) {
 				dr.Get("/", s.integ.ListBlinkIssues)
-				dr.Delete("/", s.integ.DeleteJiraIssues)
-				dr.Delete("/{issueKey}", s.integ.DeleteJiraIssues)
+				dr.Delete("/", s.integ.DeleteAllBlinkIssues)
+				dr.Delete("/{issueKey}", s.integ.DeleteBlinkIssue)
 			})
 		})
 	})
@@ -255,17 +255,6 @@ func sessionEmail(r *http.Request) string {
 		return v.Email
 	}
 	return ""
-}
-
-func manualProviderAction(instructions string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"status":       "manual_action_required",
-			"message":      "Blink does not perform external provider mutations. " + instructions,
-			"instructions": instructions,
-			"errors":       []string{"manual_provider_action_required"},
-		})
-	}
 }
 
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {

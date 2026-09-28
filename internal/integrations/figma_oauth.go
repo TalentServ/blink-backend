@@ -2,9 +2,9 @@ package integrations
 
 import "strings"
 
-// Read scopes plus the Professional writes Blink uses: webhooks so Figma can
-// call Blink, and mcp:connect so a chosen screen can become a Figma file.
-const figmaDefaultScopes = "current_user:read,file_content:read,file_metadata:read,webhooks:write,mcp:connect"
+// Read scopes plus webhook writes so Figma can automatically notify Blink
+// about changes to the selected design.
+const figmaDefaultScopes = "current_user:read,file_content:read,file_metadata:read,webhooks:write"
 
 func normalizeFigmaScopes(raw string) string {
 	allowed := map[string]struct{}{
@@ -12,7 +12,6 @@ func normalizeFigmaScopes(raw string) string {
 		"file_content:read":  {},
 		"file_metadata:read": {},
 		"webhooks:write":     {},
-		"mcp:connect":        {},
 	}
 	parts := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ' ' || r == ';'
