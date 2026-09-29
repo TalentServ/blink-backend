@@ -1,13 +1,20 @@
 package com.talentserv.blink.service;
 
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class RequirementMarkdownService {
+
+    private static final Logger log = LoggerFactory.getLogger(RequirementMarkdownService.class);
+
+    private final RequirementTextExtractor requirementTextExtractor;
+
+    public RequirementMarkdownService(RequirementTextExtractor requirementTextExtractor) {
+        this.requirementTextExtractor = requirementTextExtractor;
+    }
 
     public String toMarkdown(String projectName, MultipartFile file, String pastedText) {
         String title = projectName == null || projectName.isBlank() ? "Project" : projectName.trim();
@@ -15,20 +22,30 @@ public class RequirementMarkdownService {
             return withTitle(title, pastedText.strip());
         }
         if (file != null && !file.isEmpty()) {
-            String extracted = extractText(file);
-            if (extracted != null && !extracted.isBlank()) {
-                return withTitle(title, extracted.strip());
+            try {
+                String extracted = requirementTextExtractor.extract(file.getOriginalFilename(), file.getBytes());
+                return withTitle(title, extracted);
+            } catch (RuntimeException ex) {
+                log.warn("Could not extract requirement text from {}: {}", file.getOriginalFilename(), ex.getMessage());
+                return unreadPlaceholder(title, file.getOriginalFilename());
+            } catch (Exception ex) {
+                log.warn("Could not extract requirement text from {}: {}", file.getOriginalFilename(), ex.toString());
+                return unreadPlaceholder(title, file.getOriginalFilename());
             }
-            return """
-                    # %s
-
-                    Requirement document uploaded: `%s`
-
-                    Blink could not extract text from this file. Replace this page with the full
-                    requirements before running the SDLC workflow.
-                    """.formatted(title, file.getOriginalFilename());
         }
         throw new IllegalArgumentException("Upload a document or paste requirements.");
+    }
+
+    private static String unreadPlaceholder(String title, String fileName) {
+        String name = fileName == null || fileName.isBlank() ? "upload" : fileName;
+        return """
+                # %s
+
+                Requirement document uploaded: `%s`
+
+                Blink could not extract text from this file. Replace this page with the full
+                requirements before running the SDLC workflow.
+                """.formatted(title, name);
     }
 
     private static String withTitle(String title, String body) {
@@ -36,40 +53,5 @@ public class RequirementMarkdownService {
             return body;
         }
         return "# " + title + "\n\n" + body + "\n";
-    }
-
-    private static String extractText(MultipartFile file) {
-        try {
-            byte[] bytes = file.getBytes();
-            if (!looksLikeText(bytes)) {
-                return null;
-            }
-            Charset charset = detectCharset(bytes);
-            return new String(bytes, charset);
-        } catch (Exception ex) {
-            return null;
-        }
-    }
-
-    private static boolean looksLikeText(byte[] bytes) {
-        int limit = Math.min(bytes.length, 4096);
-        int suspicious = 0;
-        for (int i = 0; i < limit; i++) {
-            byte b = bytes[i];
-            if (b == 0) {
-                return false;
-            }
-            if (b < 0x09) {
-                suspicious++;
-            }
-        }
-        return suspicious < limit / 10;
-    }
-
-    private static Charset detectCharset(byte[] bytes) {
-        if (bytes.length >= 3 && bytes[0] == (byte) 0xEF && bytes[1] == (byte) 0xBB && bytes[2] == (byte) 0xBF) {
-            return StandardCharsets.UTF_8;
-        }
-        return StandardCharsets.UTF_8;
     }
 }

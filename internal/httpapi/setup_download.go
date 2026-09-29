@@ -107,7 +107,7 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 	if f, hdr, err := r.FormFile("file"); err == nil {
 		defer f.Close()
 		fileName = hdr.Filename
-		fileBytes, _ = io.ReadAll(io.LimitReader(f, 8<<20))
+		fileBytes, _ = io.ReadAll(io.LimitReader(f, 25<<20))
 	}
 
 	markdown, err := zipkit.ToMarkdown(p.ProjectName, fileName, fileBytes, requirementsText)

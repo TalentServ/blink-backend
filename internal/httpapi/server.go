@@ -112,6 +112,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 			pr.Get("/stakeholder-roles", s.stakeholderRoles)
 			pr.Post("/stakeholder-questions/send", s.sendStakeholderQuestions)
 			pr.Post("/grooming/clarify", s.groomClarify)
+			pr.Post("/requirements/extract", s.extractRequirement)
 
 			pr.Route("/projects", func(prr chi.Router) {
 				prr.Get("/", s.listProjects)
