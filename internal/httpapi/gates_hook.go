@@ -17,9 +17,9 @@ func agentStringField(raw json.RawMessage, key string) string {
 	return strings.TrimSpace(v)
 }
 
-func (s *Server) afterStakeholderConfirm(ctx context.Context, projectID int64, actor string, stakes []map[string]string, raw json.RawMessage) {
+func (s *Server) afterStakeholderConfirm(ctx context.Context, projectID int64, actor string, stakes []map[string]string, raw json.RawMessage) error {
 	if s.canonical == nil {
-		return
+		return nil
 	}
 	digest := agentStringField(raw, "confirmationDigest")
 	assignmentsDigest := canonical.DigestJSON(stakes)
@@ -27,13 +27,12 @@ func (s *Server) afterStakeholderConfirm(ctx context.Context, projectID int64, a
 		digest = assignmentsDigest
 	}
 	_ = assignmentsDigest
-	_ = s.canonical.RecordStakeholderConfirmation(ctx, projectID, stakes, digest, actor)
-	_ = s.canonical.RefreshEligibility(ctx, projectID, actor)
+	return s.canonical.RecordStakeholderConfirmation(ctx, projectID, stakes, digest, actor)
 }
 
-func (s *Server) afterProductScopeConfirm(ctx context.Context, projectID int64, actor string, body map[string]any, raw json.RawMessage) {
+func (s *Server) afterProductScopeConfirm(ctx context.Context, projectID int64, actor string, body map[string]any, raw json.RawMessage) error {
 	if s.canonical == nil {
-		return
+		return nil
 	}
 	confirmed := agentStringField(raw, "confirmationDigest")
 	expected, _ := body["expectedDigest"].(string)
@@ -48,19 +47,19 @@ func (s *Server) afterProductScopeConfirm(ctx context.Context, projectID int64, 
 	if confirmed == "" {
 		confirmed = scope
 	}
-	_ = s.canonical.RecordProductScopeConfirmation(ctx, projectID, source, scope, confirmed, actor, "")
-	_ = s.canonical.RefreshEligibility(ctx, projectID, actor)
+	return s.canonical.RecordProductScopeConfirmation(ctx, projectID, source, scope, confirmed, actor, "")
 }
 
-func (s *Server) afterSdlcStart(ctx context.Context, projectID int64, raw json.RawMessage) {
+func (s *Server) afterSdlcStart(ctx context.Context, projectID int64, raw json.RawMessage) error {
 	if s.canonical == nil {
-		return
+		return nil
 	}
 	issue := agentStringField(raw, "issueId")
 	if issue == "" {
 		issue = agentStringField(raw, "issueKey")
 	}
 	if issue != "" {
-		_ = s.canonical.RecordSDLStartIssue(ctx, projectID, issue)
+		return s.canonical.RecordSDLStartIssue(ctx, projectID, issue)
 	}
+	return nil
 }

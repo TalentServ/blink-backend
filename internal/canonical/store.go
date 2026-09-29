@@ -13,25 +13,27 @@ import (
 )
 
 type Service struct {
-	pool    *pgxpool.Pool
-	gates   *Gates
-	cmdExec CommandExecutor
+	pool     *pgxpool.Pool
+	gates    *Gates
+	registry *CommandRegistry
+	cmdExec  CommandExecutor
+	cmdHook  CommandPostHook
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, gates: NewGates(pool)}
+	return &Service{pool: pool, gates: NewGates(pool), registry: defaultCommandRegistry()}
 }
 
 type Snapshot struct {
-	ProjectID         int64           `json:"projectId"`
-	Revision          int64           `json:"revision"`
-	WizardDigest      string          `json:"wizardDigest"`
-	StageSpine        string          `json:"stageSpine"`
-	Eligibility       Eligibility     `json:"eligibility"`
-	Blockers          json.RawMessage `json:"blockers"`
-	Metadata          json.RawMessage `json:"metadata"`
-	MigratedFromWizard bool           `json:"migratedFromWizard"`
-	UpdatedAt         string          `json:"updatedAt"`
+	ProjectID          int64           `json:"projectId"`
+	Revision           int64           `json:"revision"`
+	WizardDigest       string          `json:"wizardDigest"`
+	StageSpine         string          `json:"stageSpine"`
+	Eligibility        Eligibility     `json:"eligibility"`
+	Blockers           json.RawMessage `json:"blockers"`
+	Metadata           json.RawMessage `json:"metadata"`
+	MigratedFromWizard bool            `json:"migratedFromWizard"`
+	UpdatedAt          string          `json:"updatedAt"`
 }
 
 type DomainEvent struct {
@@ -174,127 +176,182 @@ func (s *Service) PreviewCommand(ctx context.Context, projectID int64, req Comma
 	if err != nil {
 		return nil, err
 	}
-	if req.ExpectedRevision != nil && *req.ExpectedRevision != snap.Revision {
-		return nil, fmt.Errorf("stale revision: expected %d have %d", *req.ExpectedRevision, snap.Revision)
+	spec, err := s.validateCommand(ctx, projectID, req, snap)
+	if err != nil {
+		return nil, err
 	}
 	preview, _ := json.Marshal(map[string]any{
-		"command":     req.Command,
+		"command":     spec.ID,
+		"mode":        spec.Mode,
+		"domainOwner": spec.DomainOwner,
 		"eligible":    snap.Eligibility,
 		"revision":    snap.Revision,
-		"agentTarget": "framework-runtime",
-		"note":        "Preview only; execute records a command run and may invoke the Framework agent runtime.",
+		"agentTarget": agentTarget(spec),
+		"note":        "Preview only; execute records a command run and invokes an agent only for agent or hybrid commands.",
 	})
 	return &CommandResult{
 		RunID:      uuid.NewString(),
 		Status:     "preview",
 		Revision:   snap.Revision,
 		Preview:    preview,
-		AgentRoute: "framework-runtime",
+		AgentRoute: agentTarget(spec),
 	}, nil
 }
 
 func (s *Service) ExecuteCommand(ctx context.Context, projectID int64, req CommandRequest, actorEmail, correlationID string) (*CommandResult, error) {
-	if req.Command == "" {
-		return nil, fmt.Errorf("command is required")
-	}
 	snap, err := s.Snapshot(ctx, projectID, actorEmail)
 	if err != nil {
 		return nil, err
 	}
-	if req.ExpectedRevision != nil && *req.ExpectedRevision != snap.Revision {
-		return nil, fmt.Errorf("stale revision: expected %d have %d", *req.ExpectedRevision, snap.Revision)
+	spec, err := s.validateCommand(ctx, projectID, req, snap)
+	if err != nil {
+		return nil, err
 	}
 
 	runID := uuid.NewString()
-	tx, err := s.pool.Begin(ctx)
+	claimed, existing, err := s.claimCommandRun(ctx, runID, projectID, spec.ID, req, snap.Revision, actorEmail, correlationID)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	if !claimed {
+		return existing, nil
+	}
 
-	if req.IdempotencyKey != "" {
-		var existing uuid.UUID
-		err = tx.QueryRow(ctx, `
-			SELECT id FROM blink_command_run
-			WHERE project_id=$1 AND idempotency_key=$2
-		`, projectID, req.IdempotencyKey).Scan(&existing)
-		if err == nil {
-			var status string
-			var result []byte
-			_ = tx.QueryRow(ctx, `SELECT status, result_json FROM blink_command_run WHERE id=$1`, existing).Scan(&status, &result)
-			_ = tx.Rollback(ctx)
-			return &CommandResult{
-				RunID:    existing.String(),
-				Status:   status,
-				Revision: snap.Revision,
-				Result:   json.RawMessage(result),
-			}, nil
+	result, err := s.executeClaimedCommand(ctx, projectID, runID, spec, req, snap.Revision, actorEmail, correlationID)
+	if err != nil {
+		_ = s.finishCommandRun(ctx, runID, "failed", nil, err.Error())
+		return nil, err
+	}
+	if err := s.finishCommandRun(ctx, runID, "completed", result, ""); err != nil {
+		return nil, err
+	}
+	revision, err := s.currentRevision(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &CommandResult{
+		RunID:      runID,
+		Status:     "completed",
+		Revision:   revision,
+		Result:     result,
+		AgentRoute: agentTarget(spec),
+	}, nil
+}
+
+func agentTarget(spec CommandSpec) string {
+	if spec.Mode == CommandModeAgent || spec.Mode == CommandModeHybrid {
+		return "framework-runtime"
+	}
+	return ""
+}
+
+// claimCommandRun creates the durable idempotency claim before any external
+// agent invocation. INSERT ... ON CONFLICT makes concurrent retries return the
+// same run rather than invoking the agent twice.
+func (s *Service) claimCommandRun(ctx context.Context, runID string, projectID int64, command string, req CommandRequest, revision int64, actorEmail, correlationID string) (bool, *CommandResult, error) {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO blink_command_run (
+			id, project_id, command_name, idempotency_key, status, expected_revision,
+			actor_email, correlation_id
+		) VALUES ($1,$2,$3,NULLIF($4,''),'running',$5,NULLIF($6,''),NULLIF($7,''))
+		ON CONFLICT (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+	`, runID, projectID, command, req.IdempotencyKey, revision, actorEmail, correlationID)
+	if err != nil {
+		return false, nil, err
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil, nil
+	}
+	var existingID uuid.UUID
+	var status string
+	var errorText *string
+	var result []byte
+	err = s.pool.QueryRow(ctx, `
+		SELECT id, status, result_json, error_text
+		FROM blink_command_run WHERE project_id=$1 AND idempotency_key=$2
+	`, projectID, req.IdempotencyKey).Scan(&existingID, &status, &result, &errorText)
+	if err != nil {
+		return false, nil, err
+	}
+	out := &CommandResult{
+		RunID: existingID.String(), Status: status, Revision: revision, Result: json.RawMessage(result),
+	}
+	if errorText != nil {
+		out.Error = *errorText
+	}
+	return false, out, nil
+}
+
+func (s *Service) executeClaimedCommand(ctx context.Context, projectID int64, runID string, spec CommandSpec, req CommandRequest, revision int64, actorEmail, correlationID string) (json.RawMessage, error) {
+	if spec.Mode == CommandModeDeterministic {
+		if spec.ID != "refresh-eligibility" && spec.ID != "sync-wizard-draft" {
+			return nil, fmt.Errorf("no deterministic handler registered for %q", spec.ID)
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if err := s.RefreshEligibility(ctx, projectID, actorEmail); err != nil {
+			return nil, err
+		}
+		result, _ := json.Marshal(map[string]string{"status": "refreshed"})
+		return result, nil
+	}
+	if s.cmdExec == nil {
+		return nil, fmt.Errorf("agent command executor not configured")
+	}
+	inputDigest := DigestBytes(req.Payload)
+	if err := s.RecordAIRun(ctx, projectID, spec.ID, "", inputDigest, "", correlationID); err != nil {
+		return nil, err
+	}
+	execCtx := ctx
+	var cancel context.CancelFunc
+	if spec.Timeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, spec.Timeout)
+		defer cancel()
+	}
+	result, err := s.cmdExec.ExecuteAgentCommand(execCtx, projectID, spec.ID, req.Payload, actorEmail, correlationID)
+	if err != nil {
+		return nil, err
+	}
+	if spec.ValidateOutput != nil {
+		if err := spec.ValidateOutput(result); err != nil {
 			return nil, err
 		}
 	}
-
-	cmd := normalizeAgentCommand(req.Command)
-	var result json.RawMessage
-	status := "accepted"
-	needsRefreshTx := cmd == "refresh-eligibility" || cmd == "sync-wizard-draft"
-
-	if needsRefreshTx {
-		if err := s.refreshFromWizardTx(ctx, tx, projectID, actorEmail, correlationID); err != nil {
-			return nil, err
-		}
-		result, _ = json.Marshal(map[string]string{"status": "refreshed"})
-		status = "completed"
-	} else if agentCommandSupported(cmd) {
-		if s.cmdExec == nil {
-			return nil, fmt.Errorf("agent command executor not configured")
-		}
-		_ = tx.Rollback(ctx)
-		raw, execErr := s.cmdExec.ExecuteAgentCommand(ctx, projectID, cmd, req.Payload, actorEmail, correlationID)
-		if execErr != nil {
-			return nil, execErr
-		}
-		result = raw
-		status = "completed"
-		tx, err = s.pool.Begin(ctx)
+	if spec.Mode == CommandModeHybrid {
+		current, err := s.currentRevision(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-		defer tx.Rollback(ctx)
-	} else {
-		result, _ = json.Marshal(map[string]any{
-			"status":     "queued",
-			"command":    req.Command,
-			"agentRoute": "framework-runtime",
-			"error":      "unsupported command",
-		})
+		if current != revision {
+			return nil, fmt.Errorf("stale revision after agent proposal: expected %d have %d", revision, current)
+		}
+		if s.cmdHook == nil {
+			return nil, fmt.Errorf("hybrid command post-hook not configured")
+		}
+		if err := s.cmdHook.AfterCommand(ctx, projectID, spec.ID, req.Payload, result, actorEmail, correlationID); err != nil {
+			return nil, err
+		}
 	}
-
-	_, err = tx.Exec(ctx, `
-		INSERT INTO blink_command_run (id, project_id, command_name, idempotency_key, status, expected_revision,
-			result_json, actor_email, correlation_id, finished_at)
-		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,$9,NOW())
-	`, runID, projectID, req.Command, req.IdempotencyKey, status, snap.Revision, result, actorEmail, correlationID)
-	if err != nil {
+	outputDigest := DigestBytes(result)
+	if err := s.RecordAIRun(ctx, projectID, spec.ID, "", inputDigest, outputDigest, correlationID); err != nil {
 		return nil, err
 	}
+	return result, nil
+}
 
-	newSnap, err := s.loadSnapshotTx(ctx, tx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
+func (s *Service) finishCommandRun(ctx context.Context, runID, status string, result json.RawMessage, errorText string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE blink_command_run
+		SET status=$2, result_json=$3, error_text=NULLIF($4,''), finished_at=NOW()
+		WHERE id=$1
+	`, runID, status, result, errorText)
+	return err
+}
 
-	return &CommandResult{
-		RunID:      runID,
-		Status:     status,
-		Revision:   newSnap.Revision,
-		Result:     result,
-		AgentRoute: "framework-runtime",
-	}, nil
+func (s *Service) currentRevision(ctx context.Context, projectID int64) (int64, error) {
+	var revision int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT revision FROM blink_project_aggregate WHERE project_id=$1
+	`, projectID).Scan(&revision)
+	return revision, err
 }
 
 func (s *Service) ensureAggregate(ctx context.Context, projectID int64, actorEmail string) error {

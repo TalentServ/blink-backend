@@ -33,6 +33,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		{"migrations/007_canonical_gates.sql", "./migrations/007_canonical_gates.sql"},
 		{"migrations/008_grooming_requirements.sql", "./migrations/008_grooming_requirements.sql"},
 		{"migrations/009_repos_graph_ship.sql", "./migrations/009_repos_graph_ship.sql"},
+		{"migrations/010_governed_command_domains.sql", "./migrations/010_governed_command_domains.sql"},
 	}
 	for _, candidates := range files {
 		body, path, err := readFirst(candidates)

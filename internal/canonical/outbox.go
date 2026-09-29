@@ -13,7 +13,18 @@ func (s *Service) EnqueueProjection(ctx context.Context, projectID int64, provid
 		VALUES ($1,$2,$3,$4,'queued',NULLIF($5,''))
 		RETURNING id
 	`, projectID, provider, actionType, raw, correlationID).Scan(&id)
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	// Only Backend reaches this path. The provider reconciliation row is an
+	// auditable desired state, never an instruction an agent can execute.
+	resourceKey := actionType + ":" + DigestBytes(raw)
+	if err := s.ReconcileProviderResource(ctx, projectID, provider, resourceKey, DigestBytes(raw), "", "queued", &id, map[string]any{
+		"actionType": actionType, "correlationId": correlationID,
+	}); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Service) MarkProjectionResult(ctx context.Context, outboxID int64, success bool, response any, errText string) error {
@@ -36,6 +47,16 @@ func (s *Service) MarkProjectionResult(ctx context.Context, outboxID int64, succ
 		INSERT INTO blink_projection_attempt (outbox_id, attempt_no, status, response_json, error_text)
 		VALUES ($1,$2,$3,$4,NULLIF($5,''))
 	`, outboxID, attemptNo, status, respRaw, errText)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		UPDATE blink_provider_reconciliation
+		SET status=$2, observed_digest=CASE WHEN $2='completed' THEN $3 ELSE observed_digest END,
+			details_json=details_json || jsonb_build_object('lastError',NULLIF($4,'')),
+			last_reconciled_at=NOW(), updated_at=NOW()
+		WHERE last_outbox_id=$1
+	`, outboxID, status, DigestBytes(respRaw), errText)
 	return err
 }
 

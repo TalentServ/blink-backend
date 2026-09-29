@@ -158,8 +158,22 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				prr.Post("/{id}/canonical/commands/execute", s.canonicalCommandExecute)
 				prr.Post("/{id}/canonical/gates/confirm", s.canonicalGateConfirm)
 				prr.Get("/{id}/canonical/grooming-readiness", s.canonicalGroomingReadiness)
+				prr.Post("/{id}/canonical/grooming/questions", s.canonicalGroomingQuestion)
+				prr.Post("/{id}/canonical/grooming/answers", s.canonicalGroomingAnswer)
+				prr.Post("/{id}/canonical/grooming/decisions", s.canonicalGroomingDecision)
+				prr.Post("/{id}/canonical/grooming/contexts", s.canonicalGroomingContext)
+				prr.Post("/{id}/canonical/grooming/blockers", s.canonicalGroomingBlocker)
 				prr.Get("/{id}/canonical/graph", s.canonicalGraph)
+				prr.Post("/{id}/canonical/graph/adopt", s.canonicalGraphAdopt)
 				prr.Get("/{id}/canonical/requirements/history", s.canonicalRequirementHistory)
+				prr.Get("/{id}/canonical/architecture", s.canonicalArchitecture)
+				prr.Post("/{id}/canonical/architecture", s.canonicalArchitecture)
+				prr.Post("/{id}/canonical/architecture/pins", s.canonicalArchitecturePin)
+				prr.Post("/{id}/canonical/execution/scopes", s.canonicalExecutionScope)
+				prr.Post("/{id}/canonical/execution/leases", s.canonicalExecutionLease)
+				prr.Post("/{id}/canonical/execution/evidence", s.canonicalExecutionEvidence)
+				prr.Post("/{id}/canonical/execution/recover", s.canonicalExecutionRecover)
+				prr.Post("/{id}/canonical/provider-reconciliation", s.canonicalProviderReconciliation)
 				prr.Post("/{id}/canonical/domain/confirm", s.canonicalDomainGate)
 				prr.Get("/{id}/canonical/ship/session", s.canonicalShipSession)
 				prr.Post("/{id}/canonical/ship/checkpoint", s.canonicalShipCheckpoint)
@@ -518,11 +532,13 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 	_ = readJSON(r, &body)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	payload["stakeholders"] = stakes
-	raw, err := s.agent.ConfirmStakeholders(r.Context(), payload)
-	if err == nil {
-		s.afterStakeholderConfirm(r.Context(), id, sessionEmail(r), stakes, raw)
+	raw, err := s.executeCanonicalCompatibility(r, id, "confirm-stakeholders", payload)
+	if err != nil {
+		writeErr(w, err)
+		return
 	}
-	s.writeAgentResult(w, r, p.ProjectName, id, "confirm-stakeholders", raw, err)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) planProductScopeID(w http.ResponseWriter, r *http.Request) {

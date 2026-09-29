@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -70,8 +71,8 @@ func (s *Server) canonicalBlockers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"revision":  snap.Revision,
-		"blockers":  snap.Blockers,
+		"revision":    snap.Revision,
+		"blockers":    snap.Blockers,
 		"eligibility": snap.Eligibility,
 	})
 }
@@ -87,6 +88,10 @@ func (s *Server) canonicalCommandExecute(w http.ResponseWriter, r *http.Request)
 func (s *Server) canonicalCommand(w http.ResponseWriter, r *http.Request, preview bool) {
 	id, err := projectIDParam(r)
 	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -107,6 +112,24 @@ func (s *Server) canonicalCommand(w http.ResponseWriter, r *http.Request, previe
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) executeCanonicalCompatibility(r *http.Request, projectID int64, command string, payload map[string]any) (json.RawMessage, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
+	}
+	result, err := s.canonical.ExecuteCommand(r.Context(), projectID, canonical.CommandRequest{
+		Command: command, IdempotencyKey: idempotencyKey, Payload: raw,
+	}, sessionEmail(r), chimw.GetReqID(r.Context()))
+	if err != nil {
+		return nil, err
+	}
+	return result.Result, nil
 }
 
 func projectIDParam(r *http.Request) (int64, error) {

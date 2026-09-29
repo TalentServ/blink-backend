@@ -46,6 +46,8 @@ func (s *Server) canonicalGateConfirm(w http.ResponseWriter, r *http.Request) {
 	switch kind {
 	case "shape", "project-shape":
 		err = s.canonical.RecordShapeConfirmation(r.Context(), id, digest, actor)
+	case "architecture":
+		err = s.canonical.ConfirmArchitecture(r.Context(), id, digest, actor)
 	case "g-groom", "groom", "stakeholder-qa":
 		err = s.canonical.RecordGroomConfirmation(r.Context(), id, digest, actor)
 	case "g-plan", "work-plan", "sdlc-plan":
@@ -93,6 +95,13 @@ func (s *Server) canonicalGroomingReadiness(w http.ResponseWriter, r *http.Reque
 	p, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r))
 	if err != nil {
 		writeErr(w, err)
+		return
+	}
+	// Prefer first-class canonical grooming facts once a governed session has
+	// been initialized. Fall back to the legacy wizard draft for projects that
+	// have not migrated yet.
+	if readiness, err := s.canonical.GroomingReadiness(r.Context(), id); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"readiness": readiness})
 		return
 	}
 	var state []byte

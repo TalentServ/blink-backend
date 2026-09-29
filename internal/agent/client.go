@@ -237,6 +237,41 @@ func (c *Client) GroomingSignOffCapture(ctx context.Context, payload map[string]
 	return c.Invoke(ctx, payload)
 }
 
+// GroomingQuestions, GroomingAnalysis, DependencyGraph, and
+// ArchitectureProposal return Framework proposals only. The Backend canonical
+// API validates and adopts any proposal before it affects durable state.
+func (c *Client) GroomingQuestions(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "grooming-questions"
+	return c.Invoke(ctx, payload)
+}
+
+func (c *Client) GroomingAnalysis(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "grooming-analysis"
+	return c.Invoke(ctx, payload)
+}
+
+func (c *Client) DependencyGraph(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "dependency-graph"
+	return c.Invoke(ctx, payload)
+}
+
+func (c *Client) ArchitectureProposal(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "architecture-proposal"
+	return c.Invoke(ctx, payload)
+}
+
 func (c *Client) ImplementStep(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
 	if payload == nil {
 		payload = map[string]any{}
