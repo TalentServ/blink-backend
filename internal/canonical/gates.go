@@ -276,7 +276,7 @@ func (g *Gates) LoadBlockers(ctx context.Context, projectID int64, elig Eligibil
 	if elig.CompletedIndex >= indexForStep("project-shape") && (shapeConfirmed == nil || *shapeConfirmed == "") {
 		blockers = append(blockers, map[string]any{
 			"code":    "shape-unconfirmed",
-			"message": "Confirm project shape before repositories and work plan.",
+			"message": "Confirm the repository structure on Project Shape.",
 			"step":    "project-shape",
 		})
 	}
@@ -287,7 +287,7 @@ func (g *Gates) LoadBlockers(ctx context.Context, projectID int64, elig Eligibil
 	`, projectID).Scan(&architectureConfirmed)
 	if elig.CompletedIndex >= indexForStep("project-shape") && (architectureConfirmed == nil || *architectureConfirmed == "") {
 		blockers = append(blockers, map[string]any{
-			"code": "architecture-unconfirmed", "message": "Confirm the architecture snapshot before governed execution.", "step": "project-shape",
+			"code": "architecture-unconfirmed", "message": "Confirm the repository structure on Project Shape.", "step": "project-shape",
 		})
 	}
 	var planConfirmed *string

@@ -440,6 +440,7 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 		FROM project p
 		LEFT JOIN blink_project_aggregate a ON a.project_id = p.id
 		WHERE p.id=$1
+		FOR UPDATE OF p
 	`, projectID).Scan(&step, &through, &state, &revision, &prevDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("project not found")
