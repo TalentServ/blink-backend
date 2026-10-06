@@ -73,6 +73,13 @@ func TestPackageWorkspacePrefersKitCommandsAndMergedOverlay(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(kit, "app", "REAL_KIT.txt"), []byte("kit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	runtimeDir := filepath.Join(kit, "ai-sdlc", "tools", "orchestration")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "test_strategy.py"), []byte("def standalone_test_plan_required(state): return False\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cmdDir := filepath.Join(kit, ".cursor", "commands")
 	if err := os.MkdirAll(cmdDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -121,6 +128,10 @@ func TestPackageWorkspacePrefersKitCommandsAndMergedOverlay(t *testing.T) {
 	nestedCmd := "demo_workspace/automation_sdlc/.cursor/commands/setup-new-workspace.md"
 	if _, ok := names[nestedCmd]; ok {
 		t.Fatal("commands must not be nested under automation_sdlc/.cursor")
+	}
+	runtimeModule := "demo_workspace/automation_sdlc/ai-sdlc/tools/orchestration/test_strategy.py"
+	if _, ok := names[runtimeModule]; !ok {
+		t.Fatalf("required stage-router module %q was excluded from the workspace kit", runtimeModule)
 	}
 	if names["demo_workspace/.cursor/ai-sdlc/spec.yaml"] != "from-s3\n" {
 		t.Fatalf("s3 overlay missing, got %q", names["demo_workspace/.cursor/ai-sdlc/spec.yaml"])
