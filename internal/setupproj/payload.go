@@ -158,6 +158,9 @@ func copyBlinkContext(out map[string]any, ctx map[string]any) {
 	if len(topology) > 0 {
 		out["topology"] = topology
 	}
+	if confirmation := asMap(ctx["topologyConfirmation"]); confirmation != nil {
+		out["topologyConfirmation"] = confirmation
+	}
 
 	repos := make([]map[string]any, 0)
 	for _, item := range asSlice(ctx["repositories"]) {

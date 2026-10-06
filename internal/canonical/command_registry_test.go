@@ -14,7 +14,7 @@ func TestDefaultCommandRegistryIsCompleteAndFailsClosed(t *testing.T) {
 		"confirm-stakeholders", "configure-stakeholders", "grooming-stakeholder-pack",
 		"grooming-revision", "grooming-sign-off-capture", "propose-designs",
 		"grooming-questions", "grooming-analysis", "dependency-graph",
-		"architecture-proposal", "implement-step", "qa-validation",
+		"architecture-proposal", "confirm-topology", "implement-step", "qa-validation",
 	} {
 		if _, ok := registry.Lookup(command); !ok {
 			t.Fatalf("command %q is missing from the registry", command)

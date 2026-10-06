@@ -9,6 +9,11 @@ func TestHostedPayloadMapsWizardContext(t *testing.T) {
 		},
 		"repositoryModel": "polyrepo",
 		"topology":        "web + api",
+		"topologyConfirmation": map[string]any{
+			"structure":    "monorepo",
+			"confirmedBy":  "Ada:ada@ex.com",
+			"evidenceRef":  "blink:project:42",
+		},
 		"repositories": []any{
 			map[string]any{"name": "fitoyo-api", "purpose": "backend"},
 		},
@@ -26,6 +31,10 @@ func TestHostedPayloadMapsWizardContext(t *testing.T) {
 	}
 	if _, ok := out["blinkContext"]; ok {
 		t.Fatal("must not nest blinkContext")
+	}
+	confirmation, _ := out["topologyConfirmation"].(map[string]any)
+	if confirmation["structure"] != "monorepo" || confirmation["confirmedBy"] != "Ada:ada@ex.com" {
+		t.Fatalf("topologyConfirmation=%v", confirmation)
 	}
 	handles, _ := out["integration_handles"].([]map[string]any)
 	if len(handles) != 2 {

@@ -272,6 +272,14 @@ func (c *Client) ArchitectureProposal(ctx context.Context, payload map[string]an
 	return c.Invoke(ctx, payload)
 }
 
+func (c *Client) ConfirmTopology(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "confirm-topology"
+	return c.Invoke(ctx, payload)
+}
+
 func (c *Client) ImplementStep(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
 	if payload == nil {
 		payload = map[string]any{}

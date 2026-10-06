@@ -435,6 +435,14 @@ func (s *Service) InvalidateArchitecture(ctx context.Context, projectID int64, r
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `UPDATE blink_architecture_pin SET invalidated_at=NOW(), invalidation_reason=NULLIF($2,'') WHERE project_id=$1 AND invalidated_at IS NULL`, projectID, reason)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		UPDATE blink_shape_gate
+		SET confirmed_digest=NULL, confirmed_by=NULL, confirmed_at=NULL, updated_at=NOW()
+		WHERE project_id=$1
+	`, projectID)
 	return err
 }
 

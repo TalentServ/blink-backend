@@ -85,6 +85,8 @@ func (s *Server) ExecuteAgentCommand(ctx context.Context, projectID int64, comma
 		raw, err = s.agent.QaValidation(ctx, body)
 	case "architecture-proposal":
 		raw, err = s.agent.ArchitectureProposal(ctx, body)
+	case "confirm-topology":
+		raw, err = s.agent.ConfirmTopology(ctx, body)
 	default:
 		return nil, fmt.Errorf("unsupported agent command: %s", command)
 	}
@@ -113,6 +115,8 @@ func (s *Server) AfterCommand(ctx context.Context, projectID int64, command stri
 		return s.afterStakeholderConfirm(ctx, projectID, actorEmail, stakeholders, result)
 	case "confirm-product-scope":
 		return s.afterProductScopeConfirm(ctx, projectID, actorEmail, body, result)
+	case "confirm-topology":
+		return s.afterTopologyConfirm(ctx, projectID, actorEmail, body, result)
 	case "sdlc-start":
 		return s.afterSdlcStart(ctx, projectID, result)
 	default:
