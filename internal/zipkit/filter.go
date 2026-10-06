@@ -37,7 +37,9 @@ func SkipFile(name string) bool {
 	if strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".log") {
 		return true
 	}
-	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+	// test_strategy.py is a production router dependency despite its historical
+	// test_ prefix. Excluding it breaks the exported Cursor workspace.
+	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") && name != "test_strategy.py" {
 		return true
 	}
 	return strings.HasSuffix(name, "_test.py") ||
