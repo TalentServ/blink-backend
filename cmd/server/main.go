@@ -43,12 +43,16 @@ func main() {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("BLINK_SKIP_MIGRATE")), "1") {
 		log.Printf("warning: BLINK_SKIP_MIGRATE=1; skipping schema migrate")
 	} else {
-		migrateCtx, migrateCancel := context.WithTimeout(ctx, 90*time.Second)
+		// Cold Render Postgres + multi-file DDL often exceeds 90s; keep connect bounded
+		// but allow migrate enough time (same as pre-implementation-phase behavior).
+		migrateCtx, migrateCancel := context.WithTimeout(ctx, 10*time.Minute)
+		log.Printf("migrate: applying schema and migrations…")
 		if err := db.Migrate(migrateCtx, pool); err != nil {
 			migrateCancel()
 			log.Fatalf("migrate: %v", err)
 		}
 		migrateCancel()
+		log.Printf("migrate: done")
 	}
 
 	secret := strings.TrimSpace(cfg.IntegrationSecretKey)
