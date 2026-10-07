@@ -73,8 +73,10 @@ func (s *Service) RequestOTP(ctx context.Context, req OTPRequest) (*OTPRequestRe
 	if err := s.checkGate(req.AccessCode); err != nil {
 		return nil, err
 	}
+	dbCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
 	var lastSent time.Time
-	_ = s.pool.QueryRow(ctx, `SELECT last_sent_at FROM blink_otp_challenge WHERE email=$1`, email).Scan(&lastSent)
+	_ = s.pool.QueryRow(dbCtx, `SELECT last_sent_at FROM blink_otp_challenge WHERE email=$1`, email).Scan(&lastSent)
 	if !lastSent.IsZero() && time.Since(lastSent) < s.cfg.OTPResendCooldown {
 		return nil, fmt.Errorf("%w: wait before requesting another code", ErrBadRequest)
 	}
@@ -84,14 +86,14 @@ func (s *Service) RequestOTP(ctx context.Context, req OTPRequest) (*OTPRequestRe
 	}
 	now := time.Now().UTC()
 	expires := now.Add(s.cfg.OTPttl)
-	_, err = s.pool.Exec(ctx, `
+	_, err = s.pool.Exec(dbCtx, `
 		INSERT INTO blink_otp_challenge (email, code_hash, expires_at, last_sent_at, attempts)
 		VALUES ($1,$2,$3,$4,0)
 		ON CONFLICT (email) DO UPDATE SET code_hash=EXCLUDED.code_hash, expires_at=EXCLUDED.expires_at,
 			last_sent_at=EXCLUDED.last_sent_at, attempts=0
 	`, email, hashHex(otp), expires, now)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: database busy — wait a moment and try again", ErrBadRequest)
 	}
 
 	mode := "smtp"

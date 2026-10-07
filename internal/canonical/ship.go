@@ -60,6 +60,10 @@ func (s *Service) projectHasShipStep(ctx context.Context, projectID int64, stepK
 	return n > 0
 }
 
+func (s *Service) ProjectHasShipStep(ctx context.Context, projectID int64, stepKind string) bool {
+	return s.projectHasShipStep(ctx, projectID, stepKind)
+}
+
 // MaxAllowedShipSubstage derives the furthest substage the project may enter from recorded ship steps.
 func (s *Service) MaxAllowedShipSubstage(ctx context.Context, projectID int64) string {
 	maxIdx := 0

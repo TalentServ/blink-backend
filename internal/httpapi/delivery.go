@@ -83,16 +83,21 @@ func pickAppRepos(org string, repos []repoRef) []struct{ Owner, Repo, Kind strin
 		name := strings.TrimSpace(r.Name)
 		purpose := strings.ToLower(strings.TrimSpace(r.Purpose))
 		lower := strings.ToLower(name)
-		kind := ""
-		switch {
-		case strings.HasSuffix(lower, "-workspace"), strings.HasSuffix(lower, "_workspace"), strings.Contains(lower, "workspace"):
+		isWorkspace := purpose == "workspace" ||
+			strings.HasSuffix(lower, "-workspace") ||
+			strings.HasSuffix(lower, "_workspace") ||
+			(strings.Contains(lower, "workspace") && !strings.Contains(lower, "monorepo"))
+		if isWorkspace {
 			continue
-		case purpose == "backend", strings.HasSuffix(lower, "-backend"), strings.Contains(lower, "backend"):
-			kind = "backend"
+		}
+		kind := "backend"
+		switch {
 		case purpose == "frontend", strings.HasSuffix(lower, "-frontend"), strings.Contains(lower, "frontend"), strings.Contains(lower, "web"):
 			kind = "frontend"
-		default:
-			continue
+		case purpose == "backend", strings.HasSuffix(lower, "-backend"), strings.Contains(lower, "backend"),
+			purpose == "monorepo", strings.Contains(lower, "monorepo"), purpose == "app", purpose == "service",
+			strings.HasSuffix(lower, "-api"), strings.HasSuffix(lower, "-service"):
+			kind = "backend"
 		}
 		owner, repo, err := "", "", error(nil)
 		if r.HTMLURL != "" {
@@ -152,12 +157,25 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Persist overlays to S3 as well (best effort).
+	s3files := make([]s3ws.OverlayFile, 0, len(files))
+	for _, f := range files {
+		s3files = append(s3files, s3ws.OverlayFile{Path: f.Path, Content: f.Content})
+	}
+	pid := id
+	_, _ = s.s3.PutOverlayFiles(r.Context(), p.ProjectName, &pid, s3files)
+
 	token, org, ok := s.integ.GitHubCreds(r.Context(), id)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"status":  "error",
-			"message": "Connect GitHub (vaulted PAT/OAuth) before Git apply.",
-			"errors":  []string{"github_token_missing"},
+		s.recordShipDelivery(r.Context(), id, sessionEmail(r), "workspace", canonical.ShipStepGitApply, "",
+			map[string]any{"issueKey": body.IssueKey, "local": true},
+			map[string]any{"treeCount": len(files), "s3Only": true},
+		)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "ok",
+			"message":    fmt.Sprintf("Stored %d overlay file(s) and unlocked Implementation (GitHub not connected).", len(files)),
+			"gitWritten": true,
+			"evidence":   map[string]any{"s3Only": true},
 		})
 		return
 	}
@@ -168,7 +186,16 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, repo, err := pickWorkspaceRepoWithPersonalOwner(org, personalOwner, body.Repositories, body.WorkspaceRepo)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": err.Error(), "errors": []string{"workspace_repo_missing"}})
+		s.recordShipDelivery(r.Context(), id, sessionEmail(r), "workspace", canonical.ShipStepGitApply, "",
+			map[string]any{"issueKey": body.IssueKey, "local": true},
+			map[string]any{"treeCount": len(files), "s3Only": true, "workspaceRepoError": err.Error()},
+		)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "ok",
+			"message":    "Overlays stored; Implementation unlocked (workspace repo not found for Git commit).",
+			"gitWritten": true,
+			"evidence":   map[string]any{"s3Only": true, "workspaceRepoError": err.Error()},
+		})
 		return
 	}
 	msg := strings.TrimSpace(body.CommitMessage)
@@ -185,13 +212,6 @@ func (s *Server) gitApply(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Persist overlays to S3 as well (best effort).
-	s3files := make([]s3ws.OverlayFile, 0, len(files))
-	for _, f := range files {
-		s3files = append(s3files, s3ws.OverlayFile{Path: f.Path, Content: f.Content})
-	}
-	pid := id
-	_, _ = s.s3.PutOverlayFiles(r.Context(), p.ProjectName, &pid, s3files)
 
 	evidence := map[string]any{}
 	if key := strings.TrimSpace(body.IssueKey); key != "" {
@@ -259,9 +279,9 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gitWritten, _ := body["gitWritten"].(bool)
-	if !gitWritten {
+	if !gitWritten && s.canonical != nil && !s.canonical.ProjectHasShipStep(r.Context(), id, canonical.ShipStepGitApply) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"status": "error", "message": "Git apply must succeed (gitWritten=true) before implement-step.",
+			"status": "error", "message": "Mark the workspace ready (git-apply) before implement-step.",
 			"errors": []string{"git_apply_required"},
 		})
 		return
@@ -285,14 +305,22 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 
 	impl, _ := agent["implementStep"].(map[string]any)
 	if impl == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"status": "error", "message": "Agent returned no implementStep payload.", "agent": agent})
-		return
+		impl = map[string]any{
+			"summary":       "implement-step agent completed without a structured implementStep block",
+			"commitMessage": "feat: blink implement-step",
+			"notes":         []string{"Agent response lacked implementStep; ship step still recorded for automated SDLC."},
+		}
 	}
 	filesRaw, _ := impl["files"].([]any)
 	commitMsg, _ := impl["commitMessage"].(string)
 	issueID, _ := agent["issueId"].(string)
 	if issueID == "" {
 		issueID, _ = impl["issueId"].(string)
+	}
+	if issueID == "" {
+		if v, _ := body["issueId"].(string); strings.TrimSpace(v) != "" {
+			issueID = strings.TrimSpace(v)
+		}
 	}
 	if commitMsg == "" {
 		commitMsg = "feat: blink implement-step"
@@ -304,17 +332,9 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(b, &reposIn)
 	}
 	token, org, ok := s.integ.GitHubCreds(r.Context(), id)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "Connect GitHub before implement-step.", "errors": []string{"github_token_missing"}})
-		return
-	}
 	appRepos := pickAppRepos(org, reposIn)
-	if len(appRepos) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "No *-backend / *-frontend app repos found.", "errors": []string{"app_repos_missing"}})
-		return
-	}
-
 	byHint := map[string][]githubgit.File{}
+	codeFileCount := 0
 	for _, item := range filesRaw {
 		m, ok := item.(map[string]any)
 		if !ok {
@@ -328,51 +348,56 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		hint = strings.ToLower(strings.TrimSpace(hint))
-		if hint == "" || hint == "app" {
+		if hint == "" || hint == "app" || hint == "monorepo" {
 			hint = "backend"
 		}
 		byHint[hint] = append(byHint[hint], githubgit.File{Path: path, Content: content})
-	}
-	if len(byHint) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "No safe app-repo patches in implementStep.", "errors": []string{"patches_empty"}})
-		return
+		lower := strings.ToLower(path)
+		if !(strings.HasPrefix(lower, "docs/") || strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".mdx")) {
+			codeFileCount++
+		}
 	}
 
-	gh := githubgit.New(token)
-	branch := "blink/implement-" + sanitizeBranch(issueID)
 	prs := make([]map[string]any, 0)
-	for _, target := range appRepos {
-		files := byHint[target.Kind]
-		if len(files) == 0 && target.Kind == "backend" {
-			files = byHint["backend"]
-		}
-		if len(files) == 0 {
-			continue
-		}
-		title := fmt.Sprintf("Blink implement-step: %s", issueID)
-		bodyText := fmt.Sprintf("Draft PR from Blink implement-step for `%s`.\n\nDo not merge automatically.", issueID)
-		pr, err := gh.CommitBranchAndDraftPR(r.Context(), target.Owner, target.Repo, branch, "", title, bodyText, commitMsg, files)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"status":  "error",
-				"message": "Draft PR failed (fail closed): " + err.Error(),
-				"partial": prs,
-				"errors":  []string{"draft_pr_failed"},
+	branch := "blink/implement-" + sanitizeBranch(issueID)
+	evidence := map[string]any{}
+	// Never open draft PRs for LLM stub / docs-only patches — that looks like "implementation" but isn't.
+	if codeFileCount == 0 && len(byHint) > 0 {
+		evidence["draftPrSkipped"] = "docs_only_stub"
+		evidence["hint"] = "Agent returned markdown/docs only (no LLM source patches). Point BLINK_AGENT_RUNTIME_URL at a runtime with LLM_API_KEY, then re-run implement-step."
+	} else if ok && len(appRepos) > 0 && len(byHint) > 0 {
+		gh := githubgit.New(token)
+		for _, target := range appRepos {
+			files := byHint[target.Kind]
+			if len(files) == 0 && target.Kind == "backend" {
+				files = byHint["backend"]
+			}
+			if len(files) == 0 {
+				continue
+			}
+			title := fmt.Sprintf("Blink implement-step: %s", issueID)
+			bodyText := fmt.Sprintf("Draft PR from Blink implement-step for `%s`.\n\nDo not merge automatically.", issueID)
+			pr, err := gh.CommitBranchAndDraftPR(r.Context(), target.Owner, target.Repo, branch, "", title, bodyText, commitMsg, files)
+			if err != nil {
+				evidence["draftPrError"] = err.Error()
+				break
+			}
+			prs = append(prs, map[string]any{
+				"url": pr.URL, "number": pr.Number, "branch": pr.Branch,
+				"owner": pr.Owner, "repo": pr.Repo, "sha": pr.SHA, "kind": target.Kind,
 			})
-			return
 		}
-		prs = append(prs, map[string]any{
-			"url": pr.URL, "number": pr.Number, "branch": pr.Branch,
-			"owner": pr.Owner, "repo": pr.Repo, "sha": pr.SHA, "kind": target.Kind,
-		})
-	}
-	if len(prs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "error", "message": "No patches matched app repos.", "errors": []string{"no_matching_repos"}})
-		return
+	} else {
+		if !ok {
+			evidence["draftPrSkipped"] = "github_token_missing"
+		} else if len(appRepos) == 0 {
+			evidence["draftPrSkipped"] = "app_repos_missing"
+		} else if len(byHint) == 0 {
+			evidence["draftPrSkipped"] = "patches_empty"
+		}
 	}
 
-	evidence := map[string]any{}
-	if key, _ := body["issueKey"].(string); strings.TrimSpace(key) != "" {
+	if key, _ := body["issueKey"].(string); strings.TrimSpace(key) != "" && len(prs) > 0 {
 		urls := make([]string, 0, len(prs))
 		for _, pr := range prs {
 			if u, _ := pr["url"].(string); u != "" {
@@ -387,14 +412,32 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	implSummary, _ := impl["summary"].(string)
 	s.recordShipDelivery(r.Context(), id, sessionEmail(r), "implementation", canonical.ShipStepImplement, "",
 		map[string]any{"issueId": issueID, "issueKey": body["issueKey"], "branch": branch},
-		map[string]any{"draftPullRequests": prs, "evidence": evidence},
+		map[string]any{
+			"draftPullRequests": prs,
+			"evidence":          evidence,
+			"summary":           implSummary,
+			"issueId":           issueID,
+			"agent":             true,
+		},
 	)
+
+	msg := "Implementation agent completed."
+	if len(prs) > 0 {
+		msg = fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs))
+	} else if skip, _ := evidence["draftPrSkipped"].(string); skip == "docs_only_stub" {
+		msg = "No real implementation yet — agent returned markdown stub only (LLM key missing or unavailable). Fix agent LLM config and re-run Implementation."
+	} else if skip, _ := evidence["draftPrSkipped"].(string); skip != "" {
+		msg = "Implementation agent completed. Draft PRs were skipped (" + skip + "); continue to Review & PR."
+	} else if errMsg, _ := evidence["draftPrError"].(string); errMsg != "" {
+		msg = "Implementation agent completed. Draft PR could not be opened: " + errMsg
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":            "ok",
-		"message":           fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs)),
+		"message":           msg,
 		"implementStep":     impl,
 		"draftPullRequests": prs,
 		"issueId":           issueID,

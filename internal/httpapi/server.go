@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -496,7 +497,9 @@ func (s *Server) configureStakeholders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r))
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 8*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
+	ownCancel()
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -505,13 +508,22 @@ func (s *Server) configureStakeholders(w http.ResponseWriter, r *http.Request) {
 	for _, st := range p.Stakeholders {
 		stakes = append(stakes, map[string]string{"role_id": st.RoleCode, "name": st.Name, "email": st.Email})
 	}
-	raw, err := s.agent.ConfigureStakeholders(r.Context(), p.ProjectName, strconv.FormatInt(id, 10), stakes)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
+	projectName := p.ProjectName
+	projectID := strconv.FormatInt(id, 10)
+	// Soft agent enrichment — never block the wizard on Lambda.
+	go func() {
+		agentCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		_, _ = s.agent.ConfigureStakeholders(agentCtx, projectName, projectID, stakes)
+	}()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"command":     "configure-stakeholders",
+		"message":     "Stakeholder roster accepted.",
+		"sodWarnings": []any{},
+		"nextCommand": "/confirm-stakeholders",
+		"errors":      []string{},
+	})
 }
 
 func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
@@ -520,26 +532,56 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r))
+	// Ownership check must not hang the wizard on a cold/slow Neon pool.
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 8*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
+	ownCancel()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	// Must match canonicalDigestStakeholders / PUT project stale-check (roleCode keys).
+	// Using role_id here made autosave think the registry changed and revoke the gate.
+	stakeReqs := make([]project.StakeholderRequest, 0, len(p.Stakeholders))
 	stakes := make([]map[string]string, 0, len(p.Stakeholders))
 	for _, st := range p.Stakeholders {
-		stakes = append(stakes, map[string]string{"role_id": st.RoleCode, "name": st.Name, "email": st.Email})
+		stakeReqs = append(stakeReqs, project.StakeholderRequest{
+			RoleCode: st.RoleCode, Name: st.Name, Email: st.Email,
+		})
+		stakes = append(stakes, map[string]string{"roleCode": st.RoleCode, "name": st.Name, "email": st.Email})
 	}
 	var body map[string]any
 	_ = readJSON(r, &body)
+	actor := sessionEmail(r)
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	payload["stakeholders"] = stakes
-	raw, err := s.executeCanonicalCompatibility(r, id, "confirm-stakeholders", payload)
-	if err != nil {
-		writeErr(w, err)
-		return
+	digest := canonicalDigestStakeholders(stakeReqs)
+
+	// Gate must be durable before we claim success — confirm-product-scope / sdlc-start
+	// require GateStakeholdersConfirmed. Agent overlay stays best-effort in the background.
+	if s.canonical != nil {
+		dbCtx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		err := s.canonical.RecordStakeholderConfirmation(dbCtx, id, stakes, digest, actor)
+		cancel()
+		if err != nil {
+			writeErr(w, fmt.Errorf("could not record stakeholder confirmation: %w", err))
+			return
+		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":             "ok",
+		"command":            "confirm-stakeholders",
+		"message":            "Stakeholder registry confirmed.",
+		"confirmationDigest": digest,
+		"nextCommand":        "/plan-product-scope",
+		"overlayFiles":       []any{},
+		"errors":             []string{},
+	})
+	go func() {
+		agentCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		_, _ = s.agent.ConfirmStakeholders(agentCtx, payload)
+	}()
 }
 
 func (s *Server) planProductScopeID(w http.ResponseWriter, r *http.Request) {

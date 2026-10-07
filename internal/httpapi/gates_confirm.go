@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -32,14 +33,16 @@ func (s *Server) canonicalGateConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := sessionEmail(r)
+	// Soft check: allow confirm when revision only advanced (wizard.synced / autosave).
+	// Reject only if the client is ahead of the server (impossible / confused client).
 	if body.ExpectedRevision != nil {
 		snap, err := s.canonical.Snapshot(r.Context(), id, actor)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		if *body.ExpectedRevision != snap.Revision {
-			writeErr(w, badRequest("stale revision"))
+		if *body.ExpectedRevision > snap.Revision {
+			writeErr(w, badRequest(fmt.Sprintf("stale revision: expected %d have %d", *body.ExpectedRevision, snap.Revision)))
 			return
 		}
 	}

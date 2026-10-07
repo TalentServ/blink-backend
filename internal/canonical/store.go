@@ -321,7 +321,14 @@ func (s *Service) executeClaimedCommand(ctx context.Context, projectID int64, ru
 			return nil, err
 		}
 		if current != revision {
-			return nil, fmt.Errorf("stale revision after agent proposal: expected %d have %d", revision, current)
+			// Wizard autosave / domain sync often bumps revision during a long agent call.
+			// Only fail when required gates are no longer satisfied (a real conflicting change).
+			if current < revision {
+				return nil, fmt.Errorf("stale revision after agent proposal: expected %d have %d", revision, current)
+			}
+			if err := s.gates.Require(ctx, projectID, spec.RequiredGates); err != nil {
+				return nil, fmt.Errorf("stale revision after agent proposal: expected %d have %d (%v)", revision, current, err)
+			}
 		}
 		if s.cmdHook == nil {
 			return nil, fmt.Errorf("hybrid command post-hook not configured")
@@ -385,6 +392,7 @@ func (s *Service) importWizardTx(ctx context.Context, tx pgx.Tx, projectID int64
 	err := tx.QueryRow(ctx, `
 		SELECT wizard_step, wizard_completed_through, wizard_state_json
 		FROM project WHERE id=$1
+		FOR UPDATE
 	`, projectID).Scan(&step, &through, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("project not found")
@@ -408,6 +416,7 @@ func (s *Service) importWizardTx(ctx context.Context, tx pgx.Tx, projectID int64
 	_, err = tx.Exec(ctx, `
 		INSERT INTO blink_domain_event (project_id, revision, event_type, payload_json, actor_email, correlation_id)
 		VALUES ($1, 1, 'wizard.imported', $2, NULLIF($3,''), NULLIF($4,''))
+		ON CONFLICT (project_id, revision) DO NOTHING
 	`, projectID, payload, actorEmail, correlationID)
 	return err
 }
@@ -448,6 +457,15 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 	if err != nil {
 		return err
 	}
+	// Lock the aggregate row so concurrent syncs cannot assign the same next revision.
+	if revision > 0 {
+		err = tx.QueryRow(ctx, `
+			SELECT revision, wizard_digest FROM blink_project_aggregate WHERE project_id=$1 FOR UPDATE
+		`, projectID).Scan(&revision, &prevDigest)
+		if err != nil {
+			return err
+		}
+	}
 	digest := DigestBytes(state)
 	if digest == prevDigest && revision > 0 {
 		return nil
@@ -463,15 +481,21 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 	elig := ComputeEligibility(step, through, state)
 	EnrichShipEligibility(ctx, s.pool, projectID, &elig)
 	eligRaw, _ := json.Marshal(elig)
-	nextRev := revision + 1
 	if revision == 0 {
 		return s.importWizardTx(ctx, tx, projectID, actorEmail, correlationID)
 	}
-	_, err = tx.Exec(ctx, `
+	// Atomic bump — never write a guessed nextRev that another sync already claimed.
+	var nextRev int64
+	err = tx.QueryRow(ctx, `
 		UPDATE blink_project_aggregate
-		SET revision=$2, wizard_digest=$3, eligibility_json=$4, updated_at=NOW()
-		WHERE project_id=$1
-	`, projectID, nextRev, digest, eligRaw)
+		SET revision = revision + 1, wizard_digest=$2, eligibility_json=$3, updated_at=NOW()
+		WHERE project_id=$1 AND wizard_digest IS DISTINCT FROM $2
+		RETURNING revision
+	`, projectID, digest, eligRaw).Scan(&nextRev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Another writer already synced this digest while we held locks / ran domain sync.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -479,6 +503,7 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO blink_domain_event (project_id, revision, event_type, payload_json, actor_email, correlation_id)
 		VALUES ($1, $2, 'wizard.synced', $3, NULLIF($4,''), NULLIF($5,''))
+		ON CONFLICT (project_id, revision) DO NOTHING
 	`, projectID, nextRev, payload, actorEmail, correlationID)
 	return err
 }

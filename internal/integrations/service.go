@@ -160,14 +160,24 @@ func (s *Service) CreateRepositories(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Connect GitHub on Integrations first (sign in with GitHub).")
 		return
 	}
-	endpoint := "https://api.github.com/user/repos"
+	userEndpoint := "https://api.github.com/user/repos"
+	orgEndpoint := ""
 	if org != "" {
-		endpoint = "https://api.github.com/orgs/" + url.PathEscape(org) + "/repos"
+		orgEndpoint = "https://api.github.com/orgs/" + url.PathEscape(org) + "/repos"
 	}
 	headers := map[string]string{
 		"Authorization": "Bearer " + token,
 		"Accept":        "application/vnd.github+json",
 		"Content-Type":  "application/json",
+	}
+	login := strings.TrimSpace(stored.Username)
+	if login == "" {
+		login = strings.TrimSpace(stored.Account)
+	}
+	if login == "" {
+		if _, meBody, err := s.do(r.Context(), http.MethodGet, "https://api.github.com/user", headers, nil); err == nil {
+			login = firstNonEmpty(jsonText(meBody, "login"), "")
+		}
 	}
 	results := make([]map[string]any, 0, len(req.Repositories))
 	for _, spec := range req.Repositories {
@@ -181,18 +191,31 @@ func (s *Service) CreateRepositories(w http.ResponseWriter, r *http.Request) {
 			"private":     true,
 			"auto_init":   true,
 		})
+		endpoint := userEndpoint
+		if orgEndpoint != "" {
+			endpoint = orgEndpoint
+		}
 		status, resp, err := s.do(r.Context(), http.MethodPost, endpoint, headers, body)
+		// Org tokens often 401/403 when the OAuth app lacks org access — fall back to the user account.
+		if orgEndpoint != "" && err == nil && (status == 401 || status == 403) {
+			status, resp, err = s.do(r.Context(), http.MethodPost, userEndpoint, headers, body)
+			endpoint = userEndpoint
+		}
 		if err != nil {
 			results = append(results, map[string]any{
 				"name": name, "status": "failed", "htmlUrl": "", "message": err.Error(),
 			})
 			continue
 		}
+		owner := org
+		if endpoint == userEndpoint {
+			owner = login
+		}
 		switch {
 		case status == 422 && strings.Contains(strings.ToLower(resp), "already_exists"):
 			htmlURL := jsonText(resp, "html_url")
-			if htmlURL == "" && org != "" {
-				htmlURL = "https://github.com/" + org + "/" + name
+			if htmlURL == "" && owner != "" {
+				htmlURL = "https://github.com/" + owner + "/" + name
 			}
 			results = append(results, map[string]any{
 				"name": name, "status": "exists", "htmlUrl": htmlURL, "message": "Repository already exists.",
@@ -203,8 +226,9 @@ func (s *Service) CreateRepositories(w http.ResponseWriter, r *http.Request) {
 				"name": name, "status": "created", "htmlUrl": htmlURL, "message": "Created " + firstNonEmpty(htmlURL, name),
 			})
 		default:
+			detail := firstNonEmpty(jsonText(resp, "message"), fmt.Sprintf("GitHub HTTP %d", status))
 			results = append(results, map[string]any{
-				"name": name, "status": "failed", "htmlUrl": "", "message": fmt.Sprintf("GitHub HTTP %d", status),
+				"name": name, "status": "failed", "htmlUrl": "", "message": detail,
 			})
 		}
 	}
@@ -350,12 +374,13 @@ func (s *Service) GitHubOAuthURL(w http.ResponseWriter, r *http.Request) {
 	}
 	redirect := s.resolveRedirect("github", r.URL.Query().Get("redirectUri"), publicAPIBase(r))
 	scopes := firstNonEmpty(s.cfg.GitHubScopes, "repo read:org user:email")
+	// Do not set allow_signup=false — GitHub shows a generic "Looks like something went wrong!"
+	// page for many personal accounts / first-time OAuth users when signup is blocked.
 	u := "https://github.com/login/oauth/authorize" +
 		"?client_id=" + url.QueryEscape(clientID) +
 		"&redirect_uri=" + url.QueryEscape(redirect) +
 		"&scope=" + url.QueryEscape(scopes) +
-		"&state=" + url.QueryEscape(uuid.NewString()) +
-		"&allow_signup=false"
+		"&state=" + url.QueryEscape(uuid.NewString())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"configured": true, "url": u, "clientId": clientID, "redirectUri": redirect,
 		"message": "Ready for GitHub authorization.",
