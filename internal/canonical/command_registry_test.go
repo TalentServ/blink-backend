@@ -87,8 +87,14 @@ func TestServiceValidationFailsClosedBeforeAnyMutation(t *testing.T) {
 	}
 	expected := int64(3)
 	if _, err := service.validateCommand(context.Background(), 1, CommandRequest{
-		Command: "refresh-eligibility", ExpectedRevision: &expected,
+		Command: "classify-work", ExpectedRevision: &expected,
 	}, snapshot); err == nil {
 		t.Fatal("stale revision must be rejected before a command run is created")
+	}
+	// Catch-up commands ignore ExpectedRevision so wizard autosave races do not block.
+	if _, err := service.validateCommand(context.Background(), 1, CommandRequest{
+		Command: "sync-wizard-draft", ExpectedRevision: &expected,
+	}, snapshot); err != nil {
+		t.Fatalf("sync-wizard-draft must ignore stale expectedRevision: %v", err)
 	}
 }

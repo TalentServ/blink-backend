@@ -126,11 +126,13 @@ func defaultCommandRegistry() *CommandRegistry {
 		spec("confirm-product-scope", CommandModeHybrid, "product", "requirements", GateStakeholdersConfirmed),
 		spec("confirm-stakeholders", CommandModeHybrid, "grooming", "project-stakeholders"),
 		spec("configure-stakeholders", CommandModeAgent, "grooming", "project-stakeholders"),
-		spec("grooming-stakeholder-pack", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
-		spec("grooming-revision", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
-		spec("grooming-sign-off-capture", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
-		spec("grooming-questions", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
-		spec("grooming-analysis", CommandModeAgent, "grooming", "stakeholder-qa", GateProductScopeConfirmed),
+		// Grooming loop runs after stakeholder registry confirmation and Q&A,
+		// before product-scope lock / Jira ticket creation.
+		spec("grooming-stakeholder-pack", CommandModeAgent, "grooming", "stakeholder-qa", GateStakeholdersConfirmed),
+		spec("grooming-revision", CommandModeAgent, "grooming", "stakeholder-qa", GateStakeholdersConfirmed),
+		spec("grooming-sign-off-capture", CommandModeAgent, "grooming", "stakeholder-qa", GateStakeholdersConfirmed),
+		spec("grooming-questions", CommandModeAgent, "grooming", "stakeholder-qa", GateStakeholdersConfirmed),
+		spec("grooming-analysis", CommandModeAgent, "grooming", "stakeholder-qa", GateStakeholdersConfirmed),
 		spec("dependency-graph", CommandModeAgent, "planning", "sdlc-plan", GateProductScopeConfirmed),
 		spec("propose-designs", CommandModeAgent, "architecture", "project-shape", GateProductScopeConfirmed),
 		spec("architecture-proposal", CommandModeAgent, "architecture", ""),
@@ -164,7 +166,9 @@ func (s *Service) validateCommand(ctx context.Context, projectID int64, req Comm
 	if !ok {
 		return CommandSpec{}, fmt.Errorf("unknown command: %s", strings.TrimSpace(req.Command))
 	}
-	if req.ExpectedRevision != nil && *req.ExpectedRevision != snap.Revision {
+	// Catch-up commands must not fail when wizard autosave already advanced revision.
+	skipRevisionCheck := spec.ID == "sync-wizard-draft" || spec.ID == "refresh-eligibility"
+	if !skipRevisionCheck && req.ExpectedRevision != nil && *req.ExpectedRevision != snap.Revision {
 		return CommandSpec{}, fmt.Errorf("stale revision: expected %d have %d", *req.ExpectedRevision, snap.Revision)
 	}
 	if err := spec.eligible(snap.Eligibility); err != nil {

@@ -1,5 +1,8 @@
 target/
 bin/
+.gocache/
+.gotmp/
+*.exe
 .idea/
 *.iml
 .classpath
