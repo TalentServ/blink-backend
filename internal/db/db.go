@@ -5,13 +5,32 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	dsn := normalizeDSN(databaseURL)
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse database url: %w", err)
+	}
+	// Neon pooler: allow a few concurrent saves without letting hung work exhaust the project.
+	cfg.MaxConns = 8
+	cfg.MinConns = 0
+	cfg.MaxConnLifetime = 30 * time.Minute
+	cfg.MaxConnIdleTime = 2 * time.Minute
+	cfg.HealthCheckPeriod = 30 * time.Second
+	if cfg.ConnConfig != nil {
+		cfg.ConnConfig.ConnectTimeout = 10 * time.Second
+		// Cap statement runtime so one cold query cannot hold a pool slot for minutes.
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = "15000"
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}

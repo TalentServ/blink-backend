@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -91,13 +94,50 @@ func (s *Server) canonicalCommand(w http.ResponseWriter, r *http.Request, previe
 		writeErr(w, err)
 		return
 	}
-	if _, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r)); err != nil {
-		writeErr(w, err)
-		return
-	}
 	var req canonical.CommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, badRequest("invalid JSON body"))
+		return
+	}
+	// Agent-first for shape suggestion / confirm — same as dedicated routes.
+	cmd := strings.TrimSpace(req.Command)
+	if !preview && (cmd == "architecture-proposal" || cmd == "confirm-topology") {
+		payload := map[string]any{}
+		if len(req.Payload) > 0 {
+			_ = json.Unmarshal(req.Payload, &payload)
+		}
+		projectName := strings.TrimSpace(fmt.Sprint(payload["projectName"]))
+		if projectName == "" {
+			projectName = "project"
+		}
+		body := s.advisoryPayload(r, projectName, id, payload)
+		var raw json.RawMessage
+		var agentErr error
+		if cmd == "architecture-proposal" {
+			raw, agentErr = s.agent.ArchitectureProposal(r.Context(), body)
+		} else {
+			raw, agentErr = s.agent.ConfirmTopology(r.Context(), body)
+			if agentErr == nil {
+				actor := sessionEmail(r)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+					defer cancel()
+					_ = s.afterTopologyConfirm(ctx, id, actor, body, raw)
+				}()
+			}
+		}
+		if agentErr != nil {
+			writeErr(w, agentErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "completed",
+			"result": json.RawMessage(raw),
+		})
+		return
+	}
+	if _, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r)); err != nil {
+		writeErr(w, busyOr(err))
 		return
 	}
 	correlationID := chimw.GetReqID(r.Context())

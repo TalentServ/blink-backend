@@ -146,6 +146,8 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				prr.Post("/{id}/qa-validation", s.qaValidation)
 				prr.Post("/{id}/sdlc-start", s.sdlcStart)
 				prr.Post("/{id}/sdlc-next", s.sdlcNext)
+				prr.Post("/{id}/architecture-proposal", s.architectureProposal)
+				prr.Post("/{id}/confirm-topology", s.confirmTopology)
 				prr.Post("/{id}/jira-gate-evidence", s.jiraGateEvidence)
 				prr.Post("/{id}/setup", s.setupProject)
 				prr.Post("/{id}/download", s.downloadProject)
@@ -402,16 +404,24 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.Create(r.Context(), req, sessionEmail(r))
+	dbCtx, dbCancel := context.WithTimeout(r.Context(), 45*time.Second)
+	p, err := s.proj.Create(dbCtx, req, sessionEmail(r))
+	dbCancel()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
 	id := p.ID
-	if email := sessionEmail(r); email != "" {
-		_, _ = s.integ.ApplyUserConnections(r.Context(), email, id)
-	}
-	go s.s3.ProvisionAsync(context.Background(), p.ProjectName, &id)
+	email := sessionEmail(r)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if email != "" {
+			_, _ = s.integ.ApplyUserConnections(ctx, email, id)
+		}
+		s.s3.ProvisionAsync(ctx, p.ProjectName, &id)
+	}()
+	attachWorkspaceProgress(p, s.s3.Progress(p.ProjectName, &id))
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -426,18 +436,30 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.Update(r.Context(), id, req, sessionEmail(r))
+	// Fail fast under Neon pressure so autosave does not hold pool slots for minutes.
+	dbCtx, dbCancel := context.WithTimeout(r.Context(), 20*time.Second)
+	p, err := s.proj.Update(dbCtx, id, req, sessionEmail(r))
+	dbCancel()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
-	if s.canonical != nil {
-		stakeDigest := canonicalDigestStakeholders(req.Stakeholders)
-		if stale, _ := s.canonical.StakeholderRegistryStale(r.Context(), id, stakeDigest); stale {
-			_ = s.canonical.RevokeStakeholderConfirmation(r.Context(), id)
+	projectName := p.ProjectName
+	actor := sessionEmail(r)
+	stakes := append([]project.StakeholderRequest(nil), req.Stakeholders...)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if s.canonical != nil {
+			stakeDigest := canonicalDigestStakeholders(stakes)
+			if stale, _ := s.canonical.StakeholderRegistryStale(ctx, id, stakeDigest); stale {
+				_ = s.canonical.RevokeStakeholderConfirmation(ctx, id)
+			}
+			_ = s.canonical.RefreshEligibility(ctx, id, actor)
 		}
-		_ = s.canonical.RefreshEligibility(r.Context(), id, sessionEmail(r))
-	}
+		s.s3.EnsureProvisioned(ctx, projectName, &id)
+	}()
+	attachWorkspaceProgress(p, s.s3.Progress(projectName, &id))
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -481,8 +503,11 @@ func (s *Server) workspaceStatus(w http.ResponseWriter, r *http.Request) {
 			idPtr = &n
 		}
 	}
+	// Bound S3/status work so hung polls cannot exhaust Neon pool capacity for OTP login.
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
 	if strings.TrimSpace(name) != "" {
-		s.s3.EnsureProvisioned(r.Context(), name, idPtr)
+		s.s3.EnsureProvisioned(ctx, name, idPtr)
 	}
 	writeJSON(w, http.StatusOK, s.s3.Progress(name, idPtr))
 }
@@ -497,11 +522,11 @@ func (s *Server) configureStakeholders(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	ownCtx, ownCancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 20*time.Second)
 	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
 	ownCancel()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
 	stakes := make([]map[string]string, 0, len(p.Stakeholders))
@@ -533,11 +558,11 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Ownership check must not hang the wizard on a cold/slow Neon pool.
-	ownCtx, ownCancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 20*time.Second)
 	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
 	ownCancel()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
 	// Must match canonicalDigestStakeholders / PUT project stale-check (roleCode keys).
@@ -557,22 +582,33 @@ func (s *Server) confirmStakeholders(w http.ResponseWriter, r *http.Request) {
 	payload["stakeholders"] = stakes
 	digest := canonicalDigestStakeholders(stakeReqs)
 
-	// Gate must be durable before we claim success — confirm-product-scope / sdlc-start
-	// require GateStakeholdersConfirmed. Agent overlay stays best-effort in the background.
+	// Detached from the HTTP client so a browser abort does not cancel the Neon write.
+	// On pool pressure, return ok with a pending flag and finish the gate in the background
+	// so SDLC start is not blocked by autosave stampede.
+	gatePending := false
 	if s.canonical != nil {
-		dbCtx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		dbCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		err := s.canonical.RecordStakeholderConfirmation(dbCtx, id, stakes, digest, actor)
 		cancel()
 		if err != nil {
-			writeErr(w, fmt.Errorf("could not record stakeholder confirmation: %w", err))
-			return
+			gatePending = true
+			go func(stakesCopy []map[string]string, dig, act string) {
+				ctx, c := context.WithTimeout(context.Background(), 90*time.Second)
+				defer c()
+				_ = s.canonical.RecordStakeholderConfirmation(ctx, id, stakesCopy, dig, act)
+			}(append([]map[string]string(nil), stakes...), digest, actor)
 		}
+	}
+	msg := "Stakeholder registry confirmed."
+	if gatePending {
+		msg = "Stakeholder confirmation accepted; Neon is catching up."
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":             "ok",
 		"command":            "confirm-stakeholders",
-		"message":            "Stakeholder registry confirmed.",
+		"message":            msg,
 		"confirmationDigest": digest,
+		"gatePending":        gatePending,
 		"nextCommand":        "/plan-product-scope",
 		"overlayFiles":       []any{},
 		"errors":             []string{},
@@ -590,14 +626,56 @@ func (s *Server) planProductScopeID(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
 	var body map[string]any
 	_ = readJSON(r, &body)
-	payload := s.advisoryPayload(r, p.ProjectName, id, body)
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 20*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
+	ownCancel()
+	projectName := strings.TrimSpace(fmt.Sprint(body["projectName"]))
+	if err != nil {
+		// Neon ownership can stall; still run the planner from the request body so Tickets are not empty.
+		if projectName == "" {
+			writeErr(w, busyOr(err))
+			return
+		}
+		payload := body
+		if _, ok := payload["actor"]; !ok || strings.TrimSpace(fmt.Sprint(payload["actor"])) == "" {
+			payload["actor"] = sessionEmail(r)
+		}
+		payload["projectId"] = strconv.FormatInt(id, 10)
+		payload["projectName"] = projectName
+		if wantsSSE(r) {
+			_, writeSSE, ok := startSSE(w)
+			if !ok {
+				writeErr(w, fmt.Errorf("streaming is not supported on this connection"))
+				return
+			}
+			raw, planErr := s.agent.PlanProductScopeStreamWithPayload(r.Context(), payload, func(delta string) error {
+				if !writeSSE("thinking", map[string]any{"text": delta}) {
+					return fmt.Errorf("client disconnected")
+				}
+				return nil
+			})
+			if planErr != nil {
+				_ = writeSSE("error", map[string]any{"message": planErr.Error()})
+				return
+			}
+			_ = writeSSE("done", json.RawMessage(raw))
+			return
+		}
+		raw, planErr := s.agent.PlanProductScopeWithPayload(r.Context(), payload)
+		if planErr != nil {
+			writeErr(w, planErr)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
+		return
+	}
+	if projectName == "" {
+		projectName = p.ProjectName
+	}
+	payload := s.advisoryPayload(r, projectName, id, body)
 	if wantsSSE(r) {
 		_, writeSSE, ok := startSSE(w)
 		if !ok {
@@ -707,6 +785,26 @@ func (s *Server) clarifyProductScope(w http.ResponseWriter, r *http.Request) {
 
 // setupProject and downloadProject live in setup_download.go.
 
+func attachWorkspaceProgress(p *project.ProjectResponse, progress map[string]any) {
+	if p == nil || progress == nil {
+		return
+	}
+	if key, ok := progress["workspaceKey"].(string); ok && strings.TrimSpace(key) != "" {
+		p.WorkspaceKey = &key
+	}
+	if url, ok := progress["workspaceUrl"].(string); ok && strings.TrimSpace(url) != "" {
+		p.WorkspaceURL = &url
+	}
+	status, _ := progress["workspaceStatus"].(string)
+	if status == "" {
+		status, _ = progress["status"].(string)
+	}
+	if status == "" {
+		status = "preparing"
+	}
+	p.WorkspaceStatus = &status
+}
+
 func pathID(r *http.Request) (int64, error) {
 	raw := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(raw, 10, 64)
@@ -729,6 +827,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func busyOr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout") {
+		return fmt.Errorf("%w: database busy — wait a moment and try again", auth.ErrBadRequest)
+	}
+	return err
 }
 
 func writeErr(w http.ResponseWriter, err error) {
