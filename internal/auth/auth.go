@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,10 +26,16 @@ var (
 	ErrBadRequest   = errors.New("bad request")
 )
 
+type cachedSession struct {
+	sess Session
+	until time.Time
+}
+
 type Service struct {
-	pool *pgxpool.Pool
-	cfg  config.Config
-	mail Mailer
+	pool     *pgxpool.Pool
+	cfg      config.Config
+	mail     Mailer
+	sessions sync.Map // tokenHash -> cachedSession
 }
 
 type Mailer interface {
@@ -73,7 +80,8 @@ func (s *Service) RequestOTP(ctx context.Context, req OTPRequest) (*OTPRequestRe
 	if err := s.checkGate(req.AccessCode); err != nil {
 		return nil, err
 	}
-	dbCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	// Cold Neon often exceeds 12s; keep OTP ahead of other hung traffic.
+	dbCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	var lastSent time.Time
 	_ = s.pool.QueryRow(dbCtx, `SELECT last_sent_at FROM blink_otp_challenge WHERE email=$1`, email).Scan(&lastSent)
@@ -187,13 +195,28 @@ func (s *Service) VerifyOTP(ctx context.Context, req OTPVerify) (*SessionRespons
 		return nil, err
 	}
 	sessExp := time.Now().UTC().Add(s.cfg.SessionTTL)
+	tokenHash := hashHex(raw)
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO blink_session (token_hash, email, expires_at) VALUES ($1,$2,$3)
-	`, hashHex(raw), email, sessExp)
+	`, tokenHash, email, sessExp)
 	if err != nil {
 		return nil, err
 	}
+	s.rememberSession(tokenHash, Session{Email: email, ExpiresAt: sessExp})
 	return &SessionResponse{Token: &raw, Email: email, ExpiresAt: sessExp.Format(time.RFC3339Nano)}, nil
+}
+
+func (s *Service) rememberSession(tokenHash string, sess Session) {
+	// Keep auth off Neon for most of the session so polling + planner do not starve the pool.
+	ttl := 45 * time.Minute
+	if until := time.Until(sess.ExpiresAt); until > 0 && until < ttl {
+		ttl = until
+	}
+	s.sessions.Store(tokenHash, cachedSession{sess: sess, until: time.Now().UTC().Add(ttl)})
+}
+
+func (s *Service) forgetSession(tokenHash string) {
+	s.sessions.Delete(tokenHash)
 }
 
 func (s *Service) RequireSession(ctx context.Context, authorization string) (*Session, error) {
@@ -201,22 +224,41 @@ func (s *Service) RequireSession(ctx context.Context, authorization string) (*Se
 	if token == "" {
 		return nil, ErrUnauthorized
 	}
+	tokenHash := hashHex(token)
+	now := time.Now().UTC()
+	if v, ok := s.sessions.Load(tokenHash); ok {
+		cached := v.(cachedSession)
+		if now.Before(cached.until) && now.Before(cached.sess.ExpiresAt) {
+			out := cached.sess
+			return &out, nil
+		}
+		s.sessions.Delete(tokenHash)
+	}
+	// Cold Neon wake can be slow; cache hits above avoid saturating the pool on every API call.
+	dbCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	var email string
 	var expires time.Time
-	err := s.pool.QueryRow(ctx, `
+	err := s.pool.QueryRow(dbCtx, `
 		SELECT email, expires_at FROM blink_session WHERE token_hash=$1
-	`, hashHex(token)).Scan(&email, &expires)
+	`, tokenHash).Scan(&email, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUnauthorized
 	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline exceeded") {
+			return nil, fmt.Errorf("%w: database busy — wait a moment and try again", ErrBadRequest)
+		}
 		return nil, err
 	}
-	if time.Now().UTC().After(expires) {
-		_, _ = s.pool.Exec(ctx, `DELETE FROM blink_session WHERE token_hash=$1`, hashHex(token))
+	if now.After(expires) {
+		s.forgetSession(tokenHash)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM blink_session WHERE token_hash=$1`, tokenHash)
 		return nil, ErrUnauthorized
 	}
-	return &Session{Email: email, ExpiresAt: expires}, nil
+	sess := Session{Email: email, ExpiresAt: expires}
+	s.rememberSession(tokenHash, sess)
+	return &sess, nil
 }
 
 func (s *Service) Me(ctx context.Context, authorization string) (*SessionResponse, error) {
@@ -232,7 +274,9 @@ func (s *Service) Logout(ctx context.Context, authorization string) {
 	if token == "" {
 		return
 	}
-	_, _ = s.pool.Exec(ctx, `DELETE FROM blink_session WHERE token_hash=$1`, hashHex(token))
+	tokenHash := hashHex(token)
+	s.forgetSession(tokenHash)
+	_, _ = s.pool.Exec(ctx, `DELETE FROM blink_session WHERE token_hash=$1`, tokenHash)
 }
 
 func (s *Service) checkGate(accessCode string) error {

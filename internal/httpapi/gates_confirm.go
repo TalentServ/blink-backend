@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 )
@@ -33,12 +35,14 @@ func (s *Server) canonicalGateConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := sessionEmail(r)
+	dbCtx, dbCancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer dbCancel()
 	// Soft check: allow confirm when revision only advanced (wizard.synced / autosave).
 	// Reject only if the client is ahead of the server (impossible / confused client).
 	if body.ExpectedRevision != nil {
-		snap, err := s.canonical.Snapshot(r.Context(), id, actor)
+		snap, err := s.canonical.Snapshot(dbCtx, id, actor)
 		if err != nil {
-			writeErr(w, err)
+			writeErr(w, busyOr(err))
 			return
 		}
 		if *body.ExpectedRevision > snap.Revision {
@@ -48,22 +52,22 @@ func (s *Server) canonicalGateConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	switch kind {
 	case "shape", "project-shape":
-		err = s.canonical.RecordShapeConfirmation(r.Context(), id, digest, actor)
+		err = s.canonical.RecordShapeConfirmation(dbCtx, id, digest, actor)
 	case "architecture":
-		err = s.canonical.ConfirmArchitecture(r.Context(), id, digest, actor)
+		err = s.canonical.ConfirmArchitecture(dbCtx, id, digest, actor)
 	case "g-groom", "groom", "stakeholder-qa":
-		err = s.canonical.RecordGroomConfirmation(r.Context(), id, digest, actor)
+		err = s.canonical.RecordGroomConfirmation(dbCtx, id, digest, actor)
 	case "g-plan", "work-plan", "sdlc-plan":
-		err = s.canonical.RecordWorkPlanConfirmation(r.Context(), id, digest, actor)
+		err = s.canonical.RecordWorkPlanConfirmation(dbCtx, id, digest, actor)
 	case "repository-roster", "repositories":
 		if digest == "" {
-			err = s.canonical.ConfirmCurrentRepositoryRoster(r.Context(), id, actor)
+			err = s.canonical.ConfirmCurrentRepositoryRoster(dbCtx, id, actor)
 		} else {
-			err = s.canonical.RecordRepositoryRosterConfirmation(r.Context(), id, digest, actor)
+			err = s.canonical.RecordRepositoryRosterConfirmation(dbCtx, id, digest, actor)
 		}
 	case "repo-technology-all":
 		var n int
-		n, err = s.canonical.ConfirmAllRepoTechnologies(r.Context(), id, actor)
+		n, err = s.canonical.ConfirmAllRepoTechnologies(dbCtx, id, actor)
 		if err == nil && n == 0 {
 			writeJSON(w, http.StatusOK, map[string]any{"status": "noop", "message": "no technology rows to confirm"})
 			return
@@ -73,12 +77,17 @@ func (s *Server) canonicalGateConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
-	snap, err := s.canonical.Snapshot(r.Context(), id, actor)
+	snap, err := s.canonical.Snapshot(dbCtx, id, actor)
 	if err != nil {
-		writeErr(w, err)
+		// Gate write succeeded; snapshot is best-effort under Neon pressure.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"kind":   kind,
+			"digest": digest,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

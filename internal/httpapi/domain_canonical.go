@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 )
@@ -131,23 +133,29 @@ func (s *Server) canonicalShipCheckpoint(w http.ResponseWriter, r *http.Request)
 		writeErr(w, badRequest("invalid JSON body"))
 		return
 	}
-	if err := s.canonical.ValidateShipSubstage(r.Context(), id, body.Substage); err != nil {
-		writeErr(w, badRequest(err.Error()))
+	dbCtx, dbCancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer dbCancel()
+	if err := s.canonical.ValidateShipSubstage(dbCtx, id, body.Substage); err != nil {
+		writeErr(w, busyOr(err))
 		return
 	}
 	actor := sessionEmail(r)
-	sess, err := s.canonical.EnsureShipSession(r.Context(), id, body.Substage, actor)
+	sess, err := s.canonical.EnsureShipSession(dbCtx, id, body.Substage, actor)
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
 	stepKind := strings.TrimSpace(body.StepKind)
 	if stepKind == "" {
 		stepKind = canonical.ShipStepSubstageNav
 	}
-	_ = s.canonical.RecordShipStepWithResult(r.Context(), sess.ID, stepKind, body.IdempotencyKey, "completed", body.Payload, map[string]any{
+	_ = s.canonical.RecordShipStepWithResult(dbCtx, sess.ID, stepKind, body.IdempotencyKey, "completed", body.Payload, map[string]any{
 		"substage": body.Substage,
 	})
-	_ = s.canonical.RefreshEligibility(r.Context(), id, actor)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.canonical.RefreshEligibility(ctx, id, actor)
+	}()
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "session": sess})
 }
