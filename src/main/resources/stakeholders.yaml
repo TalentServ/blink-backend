@@ -4,20 +4,12 @@
 blink:
   stakeholders:
     - role: product_owner
-      name: Rohit Naik
-      email: rohit.naik@talentserv.co.in
     - role: business_analyst
-      name: Rohit Naik
-      email: rohit.naik@talentserv.co.in
     - role: ux_designer
       name: Riya Bajpai
       email: riya.bajpai@talentserv.co.in
     - role: platform_architect
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: tech_lead
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: backend_developer
       name: Nisha Dhore
       email: nisha.dhore@talentserv.co.in
@@ -28,20 +20,10 @@ blink:
       name: Ashwin Kumar
       email: ashwin.kumar@talentserv.co.in
     - role: sre
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: qa_lead
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: qa_engineer
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: security_champion
       name: Riya Bajpai
       email: riya.bajpai@talentserv.co.in
     - role: compliance_approver
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
     - role: release_approver
-      name: Atul Maurya
-      email: atul.maurya@talentserv.co.in
