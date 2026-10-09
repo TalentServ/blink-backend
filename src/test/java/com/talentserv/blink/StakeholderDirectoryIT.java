@@ -18,8 +18,9 @@ class StakeholderDirectoryIT {
     void loadsPeopleFromStakeholdersYaml() {
         assertThat(roleCatalog.roles()).hasSize(14);
         assertThat(roleCatalog.roles().getFirst().roleCode()).isEqualTo("product_owner");
-        assertThat(roleCatalog.roles().getFirst().defaultName()).isEqualTo("Rohit Naik");
-        assertThat(roleCatalog.roles().getFirst().defaultEmail()).isEqualTo("rohit.naik@talentserv.co.in");
+        assertThat(roleCatalog.roles().getFirst().defaultName()).isNull();
+        assertThat(roleCatalog.roles().getFirst().defaultEmail()).isNull();
+        assertThat(roleCatalog.roles()).extracting(role -> role.defaultName()).doesNotContain("Rohit Naik", "Atul Maurya");
         assertThat(roleCatalog.nameFor("backend_developer")).isEqualTo("Backend Developer");
     }
 }

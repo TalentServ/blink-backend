@@ -20,8 +20,9 @@ class RoleCatalogTest {
         RoleCatalog catalog = new RoleCatalog();
         assertThat(catalog.roles()).hasSize(14);
         assertThat(catalog.roles().getFirst().roleCode()).isEqualTo("product_owner");
-        assertThat(catalog.roles().getFirst().defaultName()).isEqualTo("Rohit Naik");
-        assertThat(catalog.roles().getFirst().defaultEmail()).isEqualTo("rohit.naik@talentserv.co.in");
+        assertThat(catalog.roles().getFirst().defaultName()).isNull();
+        assertThat(catalog.roles().getFirst().defaultEmail()).isNull();
+        assertThat(catalog.roles()).extracting(role -> role.defaultName()).doesNotContain("Rohit Naik", "Atul Maurya");
         assertThat(catalog.nameFor("backend_developer")).isEqualTo("Backend Developer");
     }
 }
