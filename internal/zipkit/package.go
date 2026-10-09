@@ -86,7 +86,7 @@ func PackageWorkspace(
 	sdlc := resolveAutomationSDLC(automationSDLCPath)
 	if sdlc == "" || !LooksReal(sdlc) {
 		_ = zw.Close()
-		return nil, fmt.Errorf("automation_sdlc kit is missing — set BLINK_AUTOMATION_SDLC_PATH or BLINK_AUTOMATION_SDLC_GIT_URL")
+		return nil, fmt.Errorf("automation_sdlc kit is missing — configure BLINK_AUTOMATION_SDLC_PATH or permit retrieval from the deployed Lambda package")
 	}
 	copied, err := copyTree(zw, sdlc, zipPath(root, "automation_sdlc"), map[string]struct{}{".cursor": {}}, map[string]struct{}{".env.mcp.example": {}}, &files)
 	if err != nil {

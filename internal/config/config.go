@@ -24,7 +24,6 @@ type Config struct {
 	S3BucketName       string
 	S3PublicBaseURL    string
 	AutomationSDLCPath string
-	AutomationSDLCGit  string
 	CanonicalPython    string
 	CanonicalTimeout   time.Duration
 
@@ -95,7 +94,6 @@ func Load() (Config, error) {
 		S3BucketName:       os.Getenv("S3_BUCKET_NAME"),
 		S3PublicBaseURL:    os.Getenv("S3_PUBLIC_BASE_URL"),
 		AutomationSDLCPath: env("BLINK_AUTOMATION_SDLC_PATH", "../automation_sdlc"),
-		AutomationSDLCGit:  env("BLINK_AUTOMATION_SDLC_GIT_URL", "https://github.com/AtulTalentServ/automation_sdlc.git"),
 		CanonicalPython:    env("BLINK_CANONICAL_SETUP_PYTHON", "python3"),
 		CanonicalTimeout:   durationEnv("BLINK_CANONICAL_SETUP_TIMEOUT", 90*time.Second),
 

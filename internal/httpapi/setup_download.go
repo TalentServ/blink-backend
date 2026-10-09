@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nisha-ts-40599/blink-backend/internal/project"
 	"github.com/nisha-ts-40599/blink-backend/internal/setupproj"
@@ -62,12 +63,11 @@ func (s *Server) setupProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kitPath, err := zipkit.Ensure(s.cfg.AutomationSDLCPath, s.cfg.AutomationSDLCGit)
+	kitPath, err := s.ensureWorkspaceKit(r.Context())
 	if err != nil {
 		writeErr(w, fmt.Errorf("workspace kit is not ready: %w", err))
 		return
 	}
-	s.cfg.AutomationSDLCPath = kitPath
 	resp, overlay, err := s.runSetup(r.Context(), p, strings.TrimSpace(req.RequirementText), nil, kitPath)
 	if err != nil {
 		writeErr(w, err)
@@ -86,9 +86,12 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	p, err := s.proj.RequireOwned(r.Context(), id, sessionEmail(r))
+	log.Printf("download start project=%d", id)
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 20*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
+	ownCancel()
 	if err != nil {
-		writeErr(w, err)
+		writeErr(w, busyOr(err))
 		return
 	}
 
@@ -124,12 +127,11 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	kitPath, err := zipkit.Ensure(s.cfg.AutomationSDLCPath, s.cfg.AutomationSDLCGit)
+	kitPath, err := s.ensureWorkspaceKit(r.Context())
 	if err != nil {
 		writeErr(w, fmt.Errorf("workspace kit is not ready: %w", err))
 		return
 	}
-	s.cfg.AutomationSDLCPath = kitPath
 
 	setup, setupOverlay, err := s.runSetup(r.Context(), p, markdown, blinkCtx, kitPath)
 	if err != nil {
@@ -214,6 +216,21 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Blink-Folder-Status", folderStatus)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(bundle.ZipBytes)
+}
+
+func (s *Server) ensureWorkspaceKit(ctx context.Context) (string, error) {
+	kit, err := zipkit.EnsureFromLambda(
+		ctx,
+		s.cfg.AutomationSDLCPath,
+		s.cfg.AgentLambdaName,
+		s.cfg.AWSRegion,
+		s.cfg.AWSAccessKeyID,
+		s.cfg.AWSSecretAccessKey,
+	)
+	if err != nil {
+		return "", err
+	}
+	return kit, nil
 }
 
 func (s *Server) runSetup(ctx context.Context, p *project.ProjectResponse, requirementText string, blinkContext map[string]any, kit string) (setupAgentResponse, map[string]string, error) {

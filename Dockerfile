@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/blink-backend ./cmd/server
 FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git python3 python3-yaml \
+    && apt-get install -y --no-install-recommends ca-certificates python3 python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/blink-backend /app/blink-backend
 COPY schema.sql /app/schema.sql
@@ -18,7 +18,5 @@ COPY migrations /app/migrations
 COPY src/main/resources/schema.sql /app/src/main/resources/schema.sql
 ENV BLINK_AUTOMATION_SDLC_PATH=/app/automation_sdlc
 ENV BLINK_PROD=true
-RUN git clone --depth 1 https://github.com/AtulTalentServ/automation_sdlc.git /app/automation_sdlc \
-    || echo "kit clone skipped; runtime will retry"
 EXPOSE 8090
 ENTRYPOINT ["/app/blink-backend"]

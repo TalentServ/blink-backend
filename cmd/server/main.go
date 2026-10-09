@@ -72,7 +72,14 @@ func main() {
 	agentClient := agent.New(cfg)
 	integ := integrations.New(pool, cfg, box)
 	s3svc := s3ws.New(cfg)
-	if kit, err := zipkit.Ensure(cfg.AutomationSDLCPath, cfg.AutomationSDLCGit); err != nil {
+	if kit, err := zipkit.EnsureFromLambda(
+		ctx,
+		cfg.AutomationSDLCPath,
+		cfg.AgentLambdaName,
+		cfg.AWSRegion,
+		cfg.AWSAccessKeyID,
+		cfg.AWSSecretAccessKey,
+	); err != nil {
 		log.Printf("warning: automation_sdlc kit not ready yet: %v", err)
 	} else {
 		cfg.AutomationSDLCPath = kit

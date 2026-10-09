@@ -66,7 +66,7 @@ The GitHub repo `blink-backend` already *is* the API. The `Dockerfile` sits at t
 | `DATABASE_URL` | **Required.** Link the existing Postgres service or paste its internal URL. The Go API applies its own migrations at startup. |
 | `BLINK_AGENT_RUNTIME_URL` | `https://z5i3yybrx1.execute-api.us-west-2.amazonaws.com` (AWS Lambda endpoint; defaults to this if omitted) |
 | `BLINK_AGENT_RUNTIME_TOKEN` | **Required in production.** Set a rotated runtime token; never use the legacy development value. |
-| `BLINK_AUTOMATION_SDLC_GIT_URL` | `https://github.com/AtulTalentServ/automation_sdlc.git` (Docker image includes git so the kit can be cloned when `/app/automation_sdlc` is empty) |
+| `BLINK_AGENT_RUNTIME_LAMBDA_FUNCTION` | `blink-agent-runtime` (the backend retrieves the packaged framework from this ZIP Lambda when `/app/automation_sdlc` is empty; no GitHub clone is used) |
 | `BLINK_CORS_ORIGINS` | `https://YOUR-FRONTEND.onrender.com` (add after the static site exists; you can also keep `http://localhost:5173`) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **Required for S3 workspaces.** Save & Continue copies the kit to `<slug>_<id>_workspace/`. |
 | `AWS_REGION` | `us-west-2` |
@@ -76,6 +76,11 @@ The GitHub repo `blink-backend` already *is* the API. The `Dockerfile` sits at t
 Render sets `PORT` for you. After deploy, note the URL, e.g. `https://blink-backend-xxxx.onrender.com`.
 
 Confirm: `https://YOUR-BACKEND.onrender.com/api/stakeholder-roles` returns the YAML people.
+
+The AWS identity used by the backend requires `lambda:GetFunction` in addition
+to its existing runtime-invoke/S3 permissions so it can retrieve the deployed
+ZIP package. This is distinct from the GitHub integration, which remains
+optional and is never used to create a workspace download.
 
 ### 2. Frontend — Static Site
 

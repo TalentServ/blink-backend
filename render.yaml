@@ -16,8 +16,6 @@ services:
         value: blink-agent-runtime
       - key: BLINK_AGENT_RUNTIME_TOKEN
         sync: false
-      - key: BLINK_AUTOMATION_SDLC_GIT_URL
-        value: https://github.com/AtulTalentServ/automation_sdlc.git
       - key: BLINK_CORS_ORIGINS
         sync: false
       - key: BLINK_INTEGRATION_SECRET_KEY

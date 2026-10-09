@@ -163,7 +163,14 @@ func (s *Service) runProvision(projectName string, id *int64, folder string, job
 
 	kit := zipkit.Resolve(s.cfg.AutomationSDLCPath)
 	if kit == "" {
-		kit, _ = zipkit.Ensure(s.cfg.AutomationSDLCPath, s.cfg.AutomationSDLCGit)
+		kit, _ = zipkit.EnsureFromLambda(
+			context.Background(),
+			s.cfg.AutomationSDLCPath,
+			s.cfg.AgentLambdaName,
+			s.cfg.AWSRegion,
+			s.cfg.AWSAccessKeyID,
+			s.cfg.AWSSecretAccessKey,
+		)
 	}
 	sdlcFiles, err := zipkit.ListAutomationSdlcFiles(kit)
 	if err != nil {
