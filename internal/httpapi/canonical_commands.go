@@ -85,6 +85,8 @@ func (s *Server) ExecuteAgentCommand(ctx context.Context, projectID int64, comma
 		raw, err = s.agent.QaValidation(ctx, body)
 	case "architecture-proposal":
 		raw, err = s.agent.ArchitectureProposal(ctx, body)
+	case "recommend-technology-stack":
+		raw, err = s.agent.RecommendTechnologyStack(ctx, body)
 	case "confirm-topology":
 		raw, err = s.agent.ConfirmTopology(ctx, body)
 	default:

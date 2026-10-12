@@ -34,7 +34,7 @@ func toPublic(in storedIntegration, scope string) publicIntegration {
 		detail = "Connected as " + in.Account
 	}
 	return publicIntegration{
-		Provider: in.Provider, Connected: strings.TrimSpace(in.AccessToken) != "" || in.Account != "",
+		Provider: in.Provider, Connected: strings.TrimSpace(in.AccessToken) != "",
 		Account: in.Account, Detail: detail, BaseURL: in.BaseURL, Email: in.Email,
 		Username: in.Username, Organization: in.Organization, Workspace: in.Workspace,
 		ProjectKey: in.ProjectKey, ProjectName: in.ProjectName, SpaceKey: in.SpaceKey,
@@ -60,7 +60,6 @@ func (s *Service) ListMine(w http.ResponseWriter, r *http.Request) {
 	out := make([]publicIntegration, 0, len(rows))
 	for _, row := range rows {
 		p := toPublic(row, "user")
-		p.Connected = true
 		out = append(out, p)
 		if row.Provider == "jira" {
 			c := p
@@ -111,7 +110,7 @@ func (s *Service) ListForProject(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		p := toPublic(stored, scope)
-		p.Connected = true
+		p.Connected = strings.TrimSpace(stored.AccessToken) != ""
 		out = append(out, p)
 		seen[provider] = true
 	}
@@ -119,13 +118,11 @@ func (s *Service) ListForProject(w http.ResponseWriter, r *http.Request) {
 		if j, ok := s.load(r.Context(), projectID, "jira"); ok {
 			c := toPublic(j, "project")
 			c.Provider = "confluence"
-			c.Connected = true
 			out = append(out, c)
 		} else if email != "" {
 			if u, ok := s.loadUser(r.Context(), email, "jira"); ok {
 				c := toPublic(u, "user")
 				c.Provider = "confluence"
-				c.Connected = true
 				out = append(out, c)
 			}
 		}
@@ -180,14 +177,12 @@ func (s *Service) ApplyUserConnections(ctx context.Context, ownerEmail string, p
 			return nil, err
 		}
 		p := toPublic(row, "project")
-		p.Connected = true
 		out = append(out, p)
 		if row.Provider == "jira" {
 			c := row
 			c.Provider = "confluence"
 			_ = s.persistProjectOnly(ctx, c)
 			cp := toPublic(c, "project")
-			cp.Connected = true
 			out = append(out, cp)
 		}
 	}
