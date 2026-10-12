@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -137,6 +138,8 @@ func (s *Service) ProvisionAsync(ctx context.Context, projectName string, id *in
 }
 
 func (s *Service) runProvision(projectName string, id *int64, folder string, job *jobState) {
+	started := time.Now()
+	log.Printf("s3 provision start folder=%s", folder)
 	key := folder + "/" + workspaceManifest
 	body, _ := json.Marshal(map[string]string{
 		"projectName": projectName,
@@ -149,7 +152,7 @@ func (s *Service) runProvision(projectName string, id *int64, folder string, job
 		ContentType: aws.String("application/json"),
 	})
 	if err != nil {
-		log.Printf("s3 provision manifest failed folder=%s: %v", folder, err)
+		log.Printf("s3 provision manifest failed folder=%s elapsed=%s: %v", folder, time.Since(started).Round(time.Millisecond), err)
 		job.setStatus("failed")
 		return
 	}
@@ -158,6 +161,7 @@ func (s *Service) runProvision(projectName string, id *int64, folder string, job
 		job.setTotal(1)
 		job.addCopied()
 		job.setStatus("ready")
+		log.Printf("s3 provision already complete folder=%s elapsed=%s", folder, time.Since(started).Round(time.Millisecond))
 		return
 	}
 
@@ -190,22 +194,37 @@ func (s *Service) runProvision(projectName string, id *int64, folder string, job
 		return
 	}
 	job.setTotal(len(sdlcFiles) + len(cmdFiles) + 1)
+	log.Printf("s3 provision copying folder=%s sdlc=%d commands=%d", folder, len(sdlcFiles), len(cmdFiles))
 	ctx := context.Background()
-	for _, rel := range sdlcFiles {
-		if err := s.putKitFile(ctx, kit, folder, rel); err != nil {
-			log.Printf("s3 provision put failed folder=%s file=%s: %v", folder, rel, err)
+	putOne := func(rel, kind string) bool {
+		putCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		putErr := s.putKitFile(putCtx, kit, folder, rel)
+		cancel()
+		if putErr != nil {
+			log.Printf("s3 provision put failed folder=%s kind=%s file=%s elapsed=%s: %v", folder, kind, rel, time.Since(started).Round(time.Millisecond), putErr)
 			job.setStatus("failed")
-			return
+			return false
 		}
 		job.addCopied()
+		_, copied, total := job.snapshot()
+		if copied == 1 || copied%25 == 0 || (total > 0 && copied == total-1) {
+			percent := 0
+			if total > 0 {
+				percent = copied * 100 / total
+			}
+			log.Printf("s3 provision progress folder=%s copied=%d/%d percent=%d file=%s elapsed=%s", folder, copied, total, percent, rel, time.Since(started).Round(time.Millisecond))
+		}
+		return true
+	}
+	for _, rel := range sdlcFiles {
+		if !putOne(rel, "kit") {
+			return
+		}
 	}
 	for _, rel := range cmdFiles {
-		if err := s.putKitFile(ctx, kit, folder, rel); err != nil {
-			log.Printf("s3 provision command put failed folder=%s file=%s: %v", folder, rel, err)
-			job.setStatus("failed")
+		if !putOne(rel, "command") {
 			return
 		}
-		job.addCopied()
 	}
 	_, err = s.s3().PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket()),
@@ -214,12 +233,13 @@ func (s *Service) runProvision(projectName string, id *int64, folder string, job
 		ContentType: aws.String("text/plain"),
 	})
 	if err != nil {
-		log.Printf("s3 provision complete marker failed folder=%s: %v", folder, err)
+		log.Printf("s3 provision complete marker failed folder=%s elapsed=%s: %v", folder, time.Since(started).Round(time.Millisecond), err)
 		job.setStatus("failed")
 		return
 	}
 	job.addCopied()
 	job.setStatus("ready")
+	log.Printf("s3 provision ready folder=%s elapsed=%s", folder, time.Since(started).Round(time.Millisecond))
 }
 
 // Progress is the UI contract: status, filesCopied, filesTotal, percent, exists.

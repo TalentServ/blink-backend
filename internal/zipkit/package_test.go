@@ -60,6 +60,58 @@ func TestPackageWorkspaceIncludesRealKit(t *testing.T) {
 	if !found {
 		t.Fatal("zip did not include the real kit file")
 	}
+	foundMakefile := false
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, "automation_sdlc/Makefile") {
+			foundMakefile = true
+			break
+		}
+	}
+	if !foundMakefile {
+		t.Fatal("zip did not include automation_sdlc/Makefile")
+	}
+}
+
+func TestPackageWorkspaceDropsPrematureWorkPlanOverlay(t *testing.T) {
+	kit := t.TempDir()
+	if err := os.WriteFile(filepath.Join(kit, "Makefile"), []byte("all:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(kit, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kit, "app", "REAL_KIT.txt"), []byte("kit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := PackageWorkspace("demo_workspace", "# req\n", nil, map[string]string{
+		".cursor/ai-sdlc/workflow-state/CALC-1/classification.md": "# classify\n",
+		".cursor/ai-sdlc/workflow-state/CALC-1/specification.md":  "# spec\n",
+		".cursor/ai-sdlc/workflow-state/CALC-1/technical-plan.md": "# plan\n",
+		".cursor/ai-sdlc/product-scope/product-scope.yaml":        "status: PROPOSED\n",
+	}, nil, SiteHints{}, kit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(bundle.ZipBytes), int64(len(bundle.ZipBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]struct{}{}
+	for _, f := range zr.File {
+		names[f.Name] = struct{}{}
+	}
+	for _, banned := range []string{
+		"demo_workspace/.cursor/ai-sdlc/workflow-state/CALC-1/classification.md",
+		"demo_workspace/.cursor/ai-sdlc/workflow-state/CALC-1/specification.md",
+		"demo_workspace/.cursor/ai-sdlc/workflow-state/CALC-1/technical-plan.md",
+	} {
+		if _, ok := names[banned]; ok {
+			t.Fatalf("premature overlay leaked into zip: %s", banned)
+		}
+	}
+	if _, ok := names["demo_workspace/.cursor/ai-sdlc/product-scope/product-scope.yaml"]; !ok {
+		t.Fatal("product-scope overlay missing from zip")
+	}
 }
 
 func TestPackageWorkspacePrefersKitCommandsAndMergedOverlay(t *testing.T) {

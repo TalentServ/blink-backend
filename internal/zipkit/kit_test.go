@@ -78,10 +78,11 @@ func TestExtractRuntimeKitIncludesOnlyWorkspaceKitFiles(t *testing.T) {
 	}
 	writer := zip.NewWriter(archive)
 	for name, body := range map[string]string{
-		"ai-sdlc/tools/setup/runner.py":        "print('framework')\n",
-		"app/main.py":                          "print('runtime')\n",
+		"ai-sdlc/tools/setup/runner.py":           "print('framework')\n",
+		"app/main.py":                             "print('runtime')\n",
+		"Makefile":                                "ai-sdlc-install:\n",
 		".cursor/commands/setup-new-workspace.md": "# setup\n",
-		"site-packages/fastapi/__init__.py":     "# dependency\n",
+		"site-packages/fastapi/__init__.py":       "# dependency\n",
 	} {
 		entry, entryErr := writer.Create(name)
 		if entryErr != nil {
@@ -115,5 +116,8 @@ func TestExtractRuntimeKitIncludesOnlyWorkspaceKitFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(destination, "site-packages")); !os.IsNotExist(err) {
 		t.Fatalf("runtime dependencies must not be copied into the downloadable kit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "Makefile")); err != nil {
+		t.Fatalf("operator Makefile missing from extracted kit: %v", err)
 	}
 }

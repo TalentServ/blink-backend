@@ -32,10 +32,13 @@ var (
 	osUnix    = osProfile{command: unixWrapper, prefix: nil}
 )
 
-func mcpJSON(providers []string, profile osProfile) string {
+func mcpJSON(providers []string, profile osProfile, hints SiteHints) string {
 	keys := []string{"filesystem"}
 	set := normalizeProviders(providers)
-	for _, p := range []string{"github", "figma", "jira", "confluence"} {
+	if set["atlassian"] {
+		keys = append(keys, "atlassian")
+	}
+	for _, p := range []string{"github", "figma"} {
 		if set[p] {
 			keys = append(keys, p)
 		}
@@ -43,7 +46,7 @@ func mcpJSON(providers []string, profile osProfile) string {
 	var b strings.Builder
 	b.WriteString("{\n  \"mcpServers\": {\n")
 	for i, key := range keys {
-		appendServer(&b, key, profile)
+		appendServer(&b, key, profile, hints)
 		if i < len(keys)-1 {
 			b.WriteByte(',')
 		}
@@ -62,9 +65,9 @@ wrapper (` + "`mcp-npx.ps1`" + `). macOS/Linux users should switch to ` + "`mcp.
 The wrapper:
 
 1. Resolves your unzip folder at runtime (no hard-coded machine paths)
-2. Loads secrets from ` + "`automation_sdlc/.env.mcp`" + `
-3. Maps ` + "`JIRA_*` → `ATLASSIAN_*`" + ` for mcp-atlassian when needed
-4. Runs MCP packages via ` + "`npm exec`" + `
+2. Loads secrets from ` + "`automation_sdlc/.env.mcp`" + ` (GitHub / Figma tokens only)
+3. When Jira, Confluence, or Atlassian is connected in Blink, ` + "`.cursor/mcp.json`" + ` already has the official Atlassian MCP (` + "`https://mcp.atlassian.com/v2/mcp`" + `). Cursor signs you in — no API token.
+4. Runs local MCP packages (filesystem, GitHub, Figma) via ` + "`npm exec`" + `
 
 ## Files
 
@@ -102,6 +105,7 @@ If the file tree hides dotfiles, look for ` + "`automation_sdlc/env.mcp.example`
 
 3. Restart Cursor (or reload MCP servers).
 4. Confirm servers under **Cursor Settings → MCP**.
+   Look for ` + "`atlassian`" + ` (not a token-based jira/confluence server). Enable it and sign in with Atlassian when Cursor prompts.
 
 Requires **Node.js 18+** (` + "`node`" + ` / ` + "`npm`" + ` on PATH).
 
@@ -124,34 +128,17 @@ func envMcpExample(providers []string, hints SiteHints) string {
 		b.WriteString("# After unzip: paste a Figma PAT here for Cursor MCP (Blink login does not copy it).\n")
 		b.WriteString("FIGMA_ACCESS_TOKEN=\n\n")
 	}
-	if set["jira"] {
-		b.WriteString("JIRA_URL=" + valueOr(hints.JiraURL, "https://YOUR_ORG.atlassian.net") + "\n")
-		b.WriteString("JIRA_USERNAME=" + valueOr(hints.JiraUsername, "you@example.com") + "\n")
-		b.WriteString("JIRA_API_TOKEN=\n")
-		b.WriteString("JIRA_CLOUD_ID=" + valueOr(hints.JiraCloudID, "") + "\n")
-		b.WriteString("# mcp-atlassian also reads these (wrapper fills from JIRA_* if blank):\n")
-		b.WriteString("ATLASSIAN_BASE_URL=" + valueOr(hints.JiraURL, "https://YOUR_ORG.atlassian.net") + "\n")
-		b.WriteString("ATLASSIAN_SITE_URL=" + valueOr(hints.JiraURL, "https://YOUR_ORG.atlassian.net") + "\n")
-		b.WriteString("ATLASSIAN_EMAIL=" + valueOr(hints.JiraUsername, "you@example.com") + "\n")
-		b.WriteString("ATLASSIAN_API_TOKEN=\n\n")
-	}
-	if set["confluence"] {
-		base := valueOr(hints.ConfluenceURL, "https://YOUR_ORG.atlassian.net")
-		wiki := base
-		if !strings.HasSuffix(base, "/wiki") {
-			wiki = trimSlash(base) + "/wiki"
+	if set["atlassian"] || set["jira"] || set["confluence"] {
+		b.WriteString("# Jira / Confluence / Atlassian in Blink → official Atlassian MCP in .cursor/mcp.json.\n")
+		b.WriteString("# Cursor OAuth — do not paste an Atlassian API token here.\n")
+		if site := atlassianSiteHost(hints.JiraURL, hints.ConfluenceURL); site != "" {
+			b.WriteString("# Connected site: " + site + "\n")
 		}
-		site := trimSlash(strings.TrimSuffix(strings.TrimSuffix(base, "/"), "/wiki"))
-		b.WriteString("ATLASSIAN_BASE_URL=" + site + "\n")
-		b.WriteString("ATLASSIAN_SITE_URL=" + site + "\n")
-		b.WriteString("CONFLUENCE_URL=" + wiki + "\n")
-		b.WriteString("CONFLUENCE_USERNAME=" + valueOr(hints.ConfluenceUsername, "you@example.com") + "\n")
-		b.WriteString("CONFLUENCE_API_TOKEN=\n")
-		b.WriteString("CONFLUENCE_CLOUD_ID=\n\n")
+		b.WriteString("\n")
 	}
-	if !set["github"] && !set["figma"] && !set["jira"] && !set["confluence"] {
+	if !set["github"] && !set["figma"] && !set["jira"] && !set["confluence"] && !set["atlassian"] {
 		b.WriteString("# No cloud MCP servers were connected in the wizard.\n")
-		b.WriteString("# Connect GitHub / Figma / Jira / Confluence and re-download, or add servers manually.\n")
+		b.WriteString("# Connect GitHub / Figma / Jira / Atlassian and re-download, or add servers manually.\n")
 	}
 	return b.String()
 }
@@ -163,18 +150,30 @@ func normalizeProviders(connected []string) map[string]bool {
 		switch id {
 		case "github", "figma", "jira", "confluence":
 			out[id] = true
+		case "atlassian":
+			out["atlassian"] = true
+			out["jira"] = true
+		case "bitbucket":
+			out["atlassian"] = true
+		}
+		if out["jira"] || out["confluence"] {
+			out["atlassian"] = true
 		}
 	}
 	return out
 }
 
-func appendServer(b *strings.Builder, key string, os osProfile) {
+func appendServer(b *strings.Builder, key string, os osProfile, hints SiteHints) {
 	switch key {
 	case "filesystem":
 		b.WriteString("    \"filesystem\": {\n")
 		b.WriteString("      \"command\": \"" + escapeJSON(os.command) + "\",\n")
 		appendArgsStart(b, os, "-y", "@modelcontextprotocol/server-filesystem", "${workspaceFolder}")
 		b.WriteString(",\n      \"env\": {}\n    }")
+	case "atlassian":
+		b.WriteString("    \"atlassian\": {\n")
+		b.WriteString("      \"url\": \"" + escapeJSON(atlassianMCPURL(hints)) + "\"\n")
+		b.WriteString("    }")
 	case "github":
 		b.WriteString("    \"github\": {\n")
 		b.WriteString("      \"command\": \"" + escapeJSON(os.command) + "\",\n")
@@ -189,35 +188,32 @@ func appendServer(b *strings.Builder, key string, os osProfile) {
 		b.WriteString(",\n      \"env\": {\n")
 		b.WriteString("        \"FIGMA_ACCESS_TOKEN\": \"${env:FIGMA_ACCESS_TOKEN}\"\n")
 		b.WriteString("      }\n    }")
-	case "jira":
-		b.WriteString("    \"jira\": {\n")
-		b.WriteString("      \"command\": \"" + escapeJSON(os.command) + "\",\n")
-		appendArgsStart(b, os, "--yes", "--package", "mcp-atlassian", "--package", "jsdom", "--", "mcp-atlassian")
-		b.WriteString(",\n      \"env\": {\n")
-		b.WriteString("        \"ATLASSIAN_BASE_URL\": \"${env:JIRA_URL}\",\n")
-		b.WriteString("        \"ATLASSIAN_SITE_URL\": \"${env:JIRA_URL}\",\n")
-		b.WriteString("        \"ATLASSIAN_EMAIL\": \"${env:JIRA_USERNAME}\",\n")
-		b.WriteString("        \"ATLASSIAN_API_TOKEN\": \"${env:JIRA_API_TOKEN}\",\n")
-		b.WriteString("        \"JIRA_URL\": \"${env:JIRA_URL}\",\n")
-		b.WriteString("        \"JIRA_CLOUD_ID\": \"${env:JIRA_CLOUD_ID}\",\n")
-		b.WriteString("        \"JIRA_USERNAME\": \"${env:JIRA_USERNAME}\",\n")
-		b.WriteString("        \"JIRA_API_TOKEN\": \"${env:JIRA_API_TOKEN}\"\n")
-		b.WriteString("      }\n    }")
-	case "confluence":
-		b.WriteString("    \"confluence\": {\n")
-		b.WriteString("      \"command\": \"" + escapeJSON(os.command) + "\",\n")
-		appendArgsStart(b, os, "--yes", "--package", "mcp-atlassian", "--package", "jsdom", "--", "mcp-atlassian")
-		b.WriteString(",\n      \"env\": {\n")
-		b.WriteString("        \"ATLASSIAN_BASE_URL\": \"${env:ATLASSIAN_BASE_URL}\",\n")
-		b.WriteString("        \"ATLASSIAN_SITE_URL\": \"${env:ATLASSIAN_SITE_URL}\",\n")
-		b.WriteString("        \"ATLASSIAN_EMAIL\": \"${env:CONFLUENCE_USERNAME}\",\n")
-		b.WriteString("        \"ATLASSIAN_API_TOKEN\": \"${env:CONFLUENCE_API_TOKEN}\",\n")
-		b.WriteString("        \"CONFLUENCE_URL\": \"${env:CONFLUENCE_URL}\",\n")
-		b.WriteString("        \"CONFLUENCE_CLOUD_ID\": \"${env:CONFLUENCE_CLOUD_ID}\",\n")
-		b.WriteString("        \"CONFLUENCE_USERNAME\": \"${env:CONFLUENCE_USERNAME}\",\n")
-		b.WriteString("        \"CONFLUENCE_API_TOKEN\": \"${env:CONFLUENCE_API_TOKEN}\"\n")
-		b.WriteString("      }\n    }")
 	}
+}
+
+func atlassianMCPURL(hints SiteHints) string {
+	base := "https://mcp.atlassian.com/v2/mcp"
+	if site := atlassianSiteHost(hints.JiraURL, hints.ConfluenceURL); site != "" {
+		return base + "?site=" + site
+	}
+	return base
+}
+
+func atlassianSiteHost(urls ...string) string {
+	for _, raw := range urls {
+		v := strings.TrimSpace(raw)
+		v = strings.TrimPrefix(v, "https://")
+		v = strings.TrimPrefix(v, "http://")
+		if i := strings.Index(v, "/"); i >= 0 {
+			v = v[:i]
+		}
+		v = strings.TrimSpace(strings.ToLower(v))
+		if v == "" || strings.Contains(v, "your_org.atlassian.net") {
+			continue
+		}
+		return v
+	}
+	return ""
 }
 
 func appendArgsStart(b *strings.Builder, os osProfile, packageArgs ...string) {
@@ -233,21 +229,6 @@ func appendArgsStart(b *strings.Builder, os osProfile, packageArgs ...string) {
 		b.WriteByte('\n')
 	}
 	b.WriteString("      ]")
-}
-
-func valueOr(v, fallback string) string {
-	if strings.TrimSpace(v) == "" {
-		return fallback
-	}
-	return strings.TrimSpace(v)
-}
-
-func trimSlash(url string) string {
-	v := strings.TrimSpace(url)
-	for strings.HasSuffix(v, "/") {
-		v = v[:len(v)-1]
-	}
-	return v
 }
 
 func escapeJSON(v string) string {
