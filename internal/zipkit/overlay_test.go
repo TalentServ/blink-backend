@@ -27,3 +27,18 @@ func TestMergeOverlaysS3ThenSetupWins(t *testing.T) {
 		t.Fatalf("count=%d files=%v", OverlayCount(merged), merged)
 	}
 }
+
+func TestMergeOverlaysDropsPrematureWorkPlanFiles(t *testing.T) {
+	merged := MergeOverlays(map[string]string{
+		".cursor/ai-sdlc/workflow-state/CALC-1/classification.md":  "# classify\n",
+		".cursor/ai-sdlc/workflow-state/CALC-1/specification.md":   "# spec\n",
+		".cursor/ai-sdlc/workflow-state/CALC-1/technical-plan.md":  "# plan\n",
+		".cursor/ai-sdlc/product-scope/product-scope.yaml":         "status: PROPOSED\n",
+	}, nil)
+	if _, ok := merged[".cursor/ai-sdlc/workflow-state/CALC-1/classification.md"]; ok {
+		t.Fatal("classification.md must not enter the download zip")
+	}
+	if merged[".cursor/ai-sdlc/product-scope/product-scope.yaml"] != "status: PROPOSED\n" {
+		t.Fatal("product-scope overlay should remain")
+	}
+}

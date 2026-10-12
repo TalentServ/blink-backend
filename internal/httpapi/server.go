@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -256,7 +257,15 @@ const sessionKey ctxKey = "session"
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		download := r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/download")
+		if download {
+			log.Printf("download request arrived path=%s", r.URL.Path)
+		}
+		authStart := time.Now()
 		sess, err := s.auth.RequireSession(r.Context(), r.Header.Get("Authorization"))
+		if download {
+			log.Printf("download auth session elapsed=%s err=%v", time.Since(authStart).Round(time.Millisecond), err)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return

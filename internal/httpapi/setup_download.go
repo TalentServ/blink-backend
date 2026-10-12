@@ -86,22 +86,32 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	started := time.Now()
+	stage := func(name string) {
+		log.Printf("download project=%d stage=%s elapsed=%s", id, name, time.Since(started).Round(time.Millisecond))
+	}
+	fail := func(name string, err error) {
+		log.Printf("download project=%d stage=%s FAILED elapsed=%s err=%v", id, name, time.Since(started).Round(time.Millisecond), err)
+		writeErr(w, err)
+	}
 	log.Printf("download start project=%d", id)
 	ownCtx, ownCancel := context.WithTimeout(r.Context(), 20*time.Second)
 	p, err := s.proj.RequireOwned(ownCtx, id, sessionEmail(r))
 	ownCancel()
 	if err != nil {
-		writeErr(w, busyOr(err))
+		fail("owned", busyOr(err))
 		return
 	}
+	stage("owned")
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		// Allow non-multipart with form values if Content-Type is form-urlencoded.
 		if err2 := r.ParseForm(); err2 != nil {
-			writeErr(w, fmt.Errorf("invalid multipart form: %w", err))
+			fail("form", fmt.Errorf("invalid multipart form: %w", err))
 			return
 		}
 	}
+	stage("form")
 
 	requirementsText := formValue(r, "requirementsText")
 	setupContext := formValue(r, "setupContext")
@@ -115,29 +125,31 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 
 	markdown, err := zipkit.ToMarkdown(p.ProjectName, fileName, fileBytes, requirementsText)
 	if err != nil {
-		writeErr(w, err)
+		fail("markdown", err)
 		return
 	}
 
 	var blinkCtx map[string]any
 	if strings.TrimSpace(setupContext) != "" {
 		if err := json.Unmarshal([]byte(setupContext), &blinkCtx); err != nil || blinkCtx == nil {
-			writeErr(w, fmt.Errorf("Setup context is invalid."))
+			fail("setup-context", fmt.Errorf("Setup context is invalid."))
 			return
 		}
 	}
 
 	kitPath, err := s.ensureWorkspaceKit(r.Context())
 	if err != nil {
-		writeErr(w, fmt.Errorf("workspace kit is not ready: %w", err))
+		fail("kit", fmt.Errorf("workspace kit is not ready: %w", err))
 		return
 	}
+	stage("kit")
 
 	setup, setupOverlay, err := s.runSetup(r.Context(), p, markdown, blinkCtx, kitPath)
 	if err != nil {
-		writeErr(w, fmt.Errorf("Canonical workspace setup was not validated: %w", err))
+		fail("setup", fmt.Errorf("Canonical workspace setup was not validated: %w", err))
 		return
 	}
+	stage(fmt.Sprintf("setup overlay=%d", len(setupOverlay)))
 
 	s3Overlay := map[string]string{}
 	if s.s3.Enabled() {
@@ -147,6 +159,7 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 		s.s3.ProvisionAsync(context.Background(), p.ProjectName, &id)
 		s.s3.PutRequirementAsync(p.ProjectName, &id, markdown)
 		s.s3.PutFrameworkCommandsAsync(p.ProjectName, &id, kitPath)
+		stage(fmt.Sprintf("s3-kick overlay=%d", len(s3Overlay)))
 	}
 	overlay := zipkit.MergeOverlays(s3Overlay, setupOverlay)
 	if s.s3.Enabled() {
@@ -162,13 +175,16 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 		ConfluenceURL:      formValue(r, "mcpConfluenceUrl"),
 		ConfluenceUsername: formValue(r, "mcpConfluenceEmail"),
 	}
+	mcpProviders, hints = s.mergeDownloadMCP(r.Context(), id, sessionEmail(r), mcpProviders, hints)
+	log.Printf("download project=%d mcp=%v atlassianSite=%s", id, mcpProviders, hints.JiraURL)
 
 	root := project.Folder(p.ProjectName, &id)
 	bundle, err := zipkit.PackageWorkspace(root, markdown, repos, overlay, mcpProviders, hints, kitPath)
 	if err != nil {
-		writeErr(w, fmt.Errorf("failed to package workspace: %w", err))
+		fail("package", fmt.Errorf("failed to package workspace: %w", err))
 		return
 	}
+	stage(fmt.Sprintf("package files=%d bytes=%d", bundle.FileCount, len(bundle.ZipBytes)))
 
 	nextCommand := zipkit.NextSDLCCommand
 	if setup.NextCommand != nil && strings.TrimSpace(*setup.NextCommand) != "" {
@@ -215,7 +231,57 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Blink-Delivery-Ready", strconv.FormatBool(delivReady))
 	w.Header().Set("X-Blink-Folder-Status", folderStatus)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(bundle.ZipBytes)
+	n, werr := w.Write(bundle.ZipBytes)
+	if werr != nil {
+		log.Printf("download project=%d stage=write FAILED wrote=%d elapsed=%s err=%v", id, n, time.Since(started).Round(time.Millisecond), werr)
+		return
+	}
+	stage(fmt.Sprintf("written bytes=%d folder=%s validated=%v", n, folderStatus, validated))
+}
+
+func (s *Server) mergeDownloadMCP(ctx context.Context, projectID int64, email string, providers []string, hints zipkit.SiteHints) ([]string, zipkit.SiteHints) {
+	if s.integ == nil {
+		return providers, hints
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(providers)+5)
+	for _, raw := range providers {
+		id := strings.ToLower(strings.TrimSpace(raw))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, provider := range []string{"jira", "confluence", "github", "figma", "bitbucket"} {
+		if !s.integ.IsConnected(ctx, projectID, email, provider) {
+			continue
+		}
+		if !seen[provider] {
+			seen[provider] = true
+			out = append(out, provider)
+		}
+		snap := s.integ.ConnectionSnapshot(ctx, projectID, email, provider)
+		if snap == nil {
+			continue
+		}
+		baseURL := snapString(snap, "baseUrl")
+		cloudID := snapString(snap, "cloudId")
+		switch provider {
+		case "jira":
+			if hints.JiraURL == "" {
+				hints.JiraURL = baseURL
+			}
+			if hints.JiraCloudID == "" {
+				hints.JiraCloudID = cloudID
+			}
+		case "confluence":
+			if hints.ConfluenceURL == "" {
+				hints.ConfluenceURL = baseURL
+			}
+		}
+	}
+	return out, hints
 }
 
 func (s *Server) ensureWorkspaceKit(ctx context.Context) (string, error) {
@@ -403,6 +469,15 @@ func formValue(r *http.Request, key string) string {
 		}
 	}
 	return r.FormValue(key)
+}
+
+func snapString(snap map[string]any, key string) string {
+	v, ok := snap[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
 }
 
 func strPtr(v any) *string {

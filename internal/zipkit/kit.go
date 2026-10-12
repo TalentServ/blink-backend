@@ -248,6 +248,10 @@ func runtimeKitPath(name string) (string, bool) {
 		return clean, true
 	case clean == "scripts/mcp-npx.sh" || clean == "scripts/mcp-npx.ps1":
 		return clean, true
+	case clean == "Makefile" || clean == "makefile":
+		return clean, true
+	case clean == "pyproject.toml" || clean == "requirements.txt" || clean == ".yamllint.yml":
+		return clean, true
 	default:
 		return "", false
 	}

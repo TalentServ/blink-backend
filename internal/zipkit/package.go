@@ -184,7 +184,7 @@ func addAgentOverlay(zw *zip.Writer, root string, overlay map[string]string, fil
 	added := false
 	for path, content := range overlay {
 		rel := SanitizeOverlayPath(path)
-		if rel == "" {
+		if rel == "" || IsPrematureWorkPlanOverlay(rel) {
 			continue
 		}
 		if err := putText(zw, zipPath(root, rel), content); err != nil {
@@ -203,9 +203,9 @@ func addMcpConfig(zw *zip.Writer, root, sdlc string, providers []string, hints S
 	items := []struct {
 		path, content string
 	}{
-		{zipPath(root, ".cursor/mcp.json"), mcpJSON(providers, osPortable)},
-		{zipPath(root, ".cursor/mcp.windows.json"), mcpJSON(providers, osWindows)},
-		{zipPath(root, ".cursor/mcp.unix.json"), mcpJSON(providers, osUnix)},
+		{zipPath(root, ".cursor/mcp.json"), mcpJSON(providers, osPortable, hints)},
+		{zipPath(root, ".cursor/mcp.windows.json"), mcpJSON(providers, osWindows, hints)},
+		{zipPath(root, ".cursor/mcp.unix.json"), mcpJSON(providers, osUnix, hints)},
 	}
 	setup := mcpSetupReadme()
 	items = append(items,
