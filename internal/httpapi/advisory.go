@@ -225,6 +225,38 @@ func (s *Server) architectureProposal(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
+// recommendTechnologyStack is agent-first: skip Neon so Technology can apply
+// AI-SDLC stack suggestions even when the pool is cold.
+func (s *Server) recommendTechnologyStack(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body map[string]any
+	_ = readJSON(r, &body)
+	projectName := strings.TrimSpace(fmt.Sprint(body["projectName"]))
+	actor := sessionEmail(r)
+
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 6*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, actor)
+	ownCancel()
+	if err == nil && projectName == "" {
+		projectName = p.ProjectName
+	}
+	if projectName == "" {
+		projectName = "project"
+	}
+	payload := s.advisoryPayload(r, projectName, id, body)
+	raw, err := s.agent.RecommendTechnologyStack(r.Context(), payload)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
 // confirmTopology is agent-first; Neon shape-gate write runs in the background.
 func (s *Server) confirmTopology(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -627,6 +628,7 @@ func (s *Service) FigmaProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	var req struct {
 		ProjectID   any              `json:"projectId"`
 		ProjectKey  string           `json:"projectKey"`
@@ -639,26 +641,36 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 		Stories     []map[string]any `json:"stories"`
 	}
 	if err := readJSON(r, &req); err != nil {
+		log.Printf("jira create rejected invalid JSON elapsed=%s err=%v", time.Since(started).Round(time.Millisecond), err)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	projectKey := strings.TrimSpace(req.ProjectKey)
 	if projectKey == "" {
+		log.Printf("jira create rejected missing project key project=%v", req.ProjectID)
 		writeErr(w, http.StatusBadRequest, "Jira project key is required.")
 		return
 	}
 	if len(req.Epics) == 0 && len(req.Stories) == 0 {
+		log.Printf("jira create rejected empty backlog key=%s", projectKey)
 		writeErr(w, http.StatusBadRequest, "Add at least one epic or story to create in Jira.")
 		return
 	}
 	projectID := parseID(req.ProjectID)
-	stored, _ := s.load(r.Context(), projectID, "jira")
+	stored, loaded := s.load(r.Context(), projectID, "jira")
 	owner := ownerFromAuth(r)
+	log.Printf(
+		"jira create start project=%d key=%s epics=%d stories=%d loaded=%v authType=%s hasAccess=%v hasCloudID=%v hasRefresh=%v ownerSet=%v",
+		projectID, projectKey, len(req.Epics), len(req.Stories), loaded, stored.AuthType,
+		strings.TrimSpace(stored.AccessToken) != "", strings.TrimSpace(stored.CloudID) != "",
+		strings.TrimSpace(stored.RefreshToken) != "", owner != "",
+	)
 	ctxJ, err := s.resolveJiraOwned(r.Context(), projectID, map[string]any{
 		"baseUrl": req.BaseURL, "email": req.Email, "token": req.Token,
 		"cloudId": req.CloudID, "accessToken": req.AccessToken,
 	}, owner)
 	if err != nil {
+		log.Printf("jira create auth FAILED project=%d key=%s elapsed=%s err=%v", projectID, projectKey, time.Since(started).Round(time.Millisecond), err)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -722,6 +734,7 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 
 	refreshedOnce := false
 	tryCreate := func(issueType, title, desc, parent, id string) (map[string]any, error) {
+		itemStarted := time.Now()
 		item, err := s.createJiraIssue(r.Context(), ctxJ, projectKey, issueType, title, desc, parent)
 		if err != nil && !refreshedOnce && strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
 			stored2, ok := s.load(r.Context(), projectID, "jira")
@@ -733,9 +746,18 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 						return s.createJiraIssue(r.Context(), ctxJ, projectKey, issueType, title, desc, parent)
 					}
 				} else {
+					log.Printf("jira create item UNAUTHORIZED refresh failed project=%d type=%s source=%s elapsed=%s err=%v",
+						projectID, issueType, id, time.Since(itemStarted).Round(time.Millisecond), rerr)
 					return nil, rerr
 				}
 			}
+		}
+		if err != nil {
+			log.Printf("jira create item FAILED project=%d type=%s source=%s elapsed=%s err=%v",
+				projectID, issueType, id, time.Since(itemStarted).Round(time.Millisecond), err)
+		} else {
+			log.Printf("jira create item ok project=%d type=%s source=%s key=%s elapsed=%s",
+				projectID, issueType, id, str(item["jiraKey"]), time.Since(itemStarted).Round(time.Millisecond))
 		}
 		return item, err
 	}
@@ -832,10 +854,8 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 		msg += "."
 	}
 	result := map[string]any{"status": status, "message": msg, "created": created, "errors": errors, "issues": created, "total": total, "linked": ok}
-	if stream && writeSSE != nil {
-		_ = writeSSE("done", result)
-		return
-	}
+	log.Printf("jira create done project=%d key=%s status=%s created=%d failed=%d elapsed=%s",
+		projectID, projectKey, status, ok, len(errors), time.Since(started).Round(time.Millisecond))
 	if projectID > 0 && ok > 0 {
 		s.recordProjection(r.Context(), projectID, "jira", "issues.create", map[string]any{
 			"projectKey": projectKey,
@@ -843,6 +863,10 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 			"total":      total,
 			"status":     status,
 		})
+	}
+	if stream && writeSSE != nil {
+		_ = writeSSE("done", result)
+		return
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1351,12 +1375,13 @@ func (s *Service) ListBlinkIssues(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctxJ, err := s.jiraFromStored(stored)
+	ctxJ, err := s.resolveJiraOwned(r.Context(), projectID, map[string]any{}, ownerFromAuth(r))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	issues := s.searchBlinkMarked(r.Context(), ctxJ, projectKey)
+	log.Printf("jira list project=%d key=%s marked=%d", projectID, projectKey, len(issues))
 	msg := fmt.Sprintf("No Blink-marked issues in Jira project %s.", projectKey)
 	if len(issues) > 0 {
 		msg = fmt.Sprintf("%d Blink-marked issue(s) in %s.", len(issues), projectKey)
@@ -1588,6 +1613,18 @@ func (s *Service) open(enc string) (string, error) {
 	return s.box.Open(enc)
 }
 
+func (s *Service) unlockToken(enc *string, provider, scope string) string {
+	if enc == nil || strings.TrimSpace(*enc) == "" {
+		return ""
+	}
+	plain, err := s.open(*enc)
+	if err != nil {
+		log.Printf("integration token unlock failed provider=%s scope=%s", provider, scope)
+		return ""
+	}
+	return plain
+}
+
 func mergeStored(existing, in storedIntegration) storedIntegration {
 	if existing.ProjectID == 0 {
 		in.Provider = strings.ToLower(strings.TrimSpace(in.Provider))
@@ -1634,7 +1671,7 @@ func (s *Service) resolveJiraOwned(ctx context.Context, projectID int64, req map
 	stored, _ := s.load(ctx, projectID, "jira")
 	cloudID := firstNonEmpty(str(req["cloudId"]), stored.CloudID)
 	access := firstNonEmpty(str(req["accessToken"]))
-	if access == "" && strings.EqualFold(stored.AuthType, "oauth") {
+	if access == "" && (strings.EqualFold(stored.AuthType, "oauth") || strings.TrimSpace(stored.CloudID) != "") {
 		access = stored.AccessToken
 	}
 	token := firstNonEmpty(str(req["token"]))
@@ -1659,7 +1696,11 @@ func (s *Service) resolveJiraOwned(ctx context.Context, projectID int64, req map
 			baseURL = firstNonEmpty(baseURL, stored.BaseURL)
 		}
 	}
-	return s.buildJiraCtx(cloudID, access, baseURL, email, token)
+	ctxJ, err := s.buildJiraCtx(cloudID, access, baseURL, email, token)
+	if err != nil && (strings.TrimSpace(stored.Account) != "" || strings.TrimSpace(stored.CloudID) != "" || strings.EqualFold(stored.AuthType, "oauth")) {
+		return jiraCtx{}, fmt.Errorf("Jira is saved in Blink but the access token is missing. Reconnect Atlassian on Integrations.")
+	}
+	return ctxJ, err
 }
 
 // ensureJiraOAuthFresh refreshes the Atlassian access token when expired/near expiry, or when force=true.
@@ -1823,22 +1864,33 @@ func (s *Service) createJiraIssue(ctx context.Context, jctx jiraCtx, projectKey,
 
 func (s *Service) searchBlinkMarked(ctx context.Context, jctx jiraCtx, projectKey string) []map[string]any {
 	jql := `project = ` + projectKey + ` AND (description ~ "Source epic:" OR description ~ "Source story:") ORDER BY key ASC`
-	payload, _ := json.Marshal(map[string]any{
-		"jql": jql, "maxResults": 100,
-		"fields": []string{"summary", "description", "issuetype", "project"},
-	})
-	status, body, err := s.do(ctx, http.MethodPost, jctx.APIBase+"/rest/api/3/search/jql", withJSON(jctx.Headers), payload)
-	if err != nil || status < 200 || status >= 300 {
-		return []map[string]any{}
-	}
-	var root map[string]any
-	_ = json.Unmarshal([]byte(body), &root)
-	issues, _ := root["issues"].([]any)
 	out := make([]map[string]any, 0)
-	for _, raw := range issues {
-		issue, _ := raw.(map[string]any)
-		if m := toBlinkMarked(jctx, projectKey, issue); m != nil {
-			out = append(out, m)
+	token := ""
+	for page := 0; page < 10; page++ {
+		req := map[string]any{
+			"jql": jql, "maxResults": 100,
+			"fields": []string{"summary", "description", "issuetype", "project"},
+		}
+		if token != "" {
+			req["nextPageToken"] = token
+		}
+		payload, _ := json.Marshal(req)
+		status, body, err := s.do(ctx, http.MethodPost, jctx.APIBase+"/rest/api/3/search/jql", withJSON(jctx.Headers), payload)
+		if err != nil || status < 200 || status >= 300 {
+			return out
+		}
+		var root map[string]any
+		_ = json.Unmarshal([]byte(body), &root)
+		issues, _ := root["issues"].([]any)
+		for _, raw := range issues {
+			issue, _ := raw.(map[string]any)
+			if m := toBlinkMarked(jctx, projectKey, issue); m != nil {
+				out = append(out, m)
+			}
+		}
+		token = str(root["nextPageToken"])
+		if token == "" {
+			break
 		}
 	}
 	return out

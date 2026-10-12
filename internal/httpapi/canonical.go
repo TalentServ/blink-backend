@@ -101,7 +101,7 @@ func (s *Server) canonicalCommand(w http.ResponseWriter, r *http.Request, previe
 	}
 	// Agent-first for shape suggestion / confirm — same as dedicated routes.
 	cmd := strings.TrimSpace(req.Command)
-	if !preview && (cmd == "architecture-proposal" || cmd == "confirm-topology") {
+	if !preview && (cmd == "architecture-proposal" || cmd == "recommend-technology-stack" || cmd == "confirm-topology") {
 		payload := map[string]any{}
 		if len(req.Payload) > 0 {
 			_ = json.Unmarshal(req.Payload, &payload)
@@ -113,9 +113,12 @@ func (s *Server) canonicalCommand(w http.ResponseWriter, r *http.Request, previe
 		body := s.advisoryPayload(r, projectName, id, payload)
 		var raw json.RawMessage
 		var agentErr error
-		if cmd == "architecture-proposal" {
+		switch cmd {
+		case "architecture-proposal":
 			raw, agentErr = s.agent.ArchitectureProposal(r.Context(), body)
-		} else {
+		case "recommend-technology-stack":
+			raw, agentErr = s.agent.RecommendTechnologyStack(r.Context(), body)
+		default:
 			raw, agentErr = s.agent.ConfirmTopology(r.Context(), body)
 			if agentErr == nil {
 				actor := sessionEmail(r)

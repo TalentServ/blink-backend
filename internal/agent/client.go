@@ -272,6 +272,14 @@ func (c *Client) ArchitectureProposal(ctx context.Context, payload map[string]an
 	return c.Invoke(ctx, payload)
 }
 
+func (c *Client) RecommendTechnologyStack(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["command"] = "recommend-technology-stack"
+	return c.Invoke(ctx, payload)
+}
+
 func (c *Client) ConfirmTopology(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
 	if payload == nil {
 		payload = map[string]any{}
