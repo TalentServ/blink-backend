@@ -26,6 +26,10 @@ func TestLocalMailOnWhenGateSetUnlessSMTPEnabled(t *testing.T) {
 	if (Config{}).LocalMail() {
 		t.Fatal("no gate means no LocalMail")
 	}
+	reveal := Config{OTPReveal: true}
+	if !reveal.LocalMail() {
+		t.Fatal("OTPReveal should enable LocalMail when Gmail/SMTP off")
+	}
 }
 
 func TestOTPRevealFromEnv(t *testing.T) {
