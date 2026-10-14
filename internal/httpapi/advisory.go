@@ -226,40 +226,6 @@ func (s *Server) architectureProposal(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
-// recommendProjectShape is agent-first: ranked shape options for Blink Project Shape.
-func (s *Server) recommendProjectShape(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	var body map[string]any
-	_ = readJSON(r, &body)
-	projectName := strings.TrimSpace(fmt.Sprint(body["projectName"]))
-	actor := sessionEmail(r)
-
-	ownCtx, ownCancel := context.WithTimeout(r.Context(), 6*time.Second)
-	p, err := s.proj.RequireOwned(ownCtx, id, actor)
-	ownCancel()
-	if err == nil && projectName == "" {
-		projectName = p.ProjectName
-	}
-	if projectName == "" {
-		projectName = "project"
-	}
-	payload := s.advisoryPayload(r, projectName, id, body)
-	log.Printf("recommend-project-shape start project=%d actor=%q", id, actor)
-	raw, err := s.agent.RecommendProjectShape(r.Context(), payload)
-	if err != nil {
-		log.Printf("recommend-project-shape agent error project=%d err=%v", id, err)
-		writeErr(w, err)
-		return
-	}
-	log.Printf("recommend-project-shape ok project=%d bytes=%d", id, len(raw))
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
-}
-
 // recommendRepositoryRoster is agent-first: repository roster from requirement + shape.
 func (s *Server) recommendRepositoryRoster(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)

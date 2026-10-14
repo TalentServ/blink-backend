@@ -272,14 +272,6 @@ func (c *Client) ArchitectureProposal(ctx context.Context, payload map[string]an
 	return c.Invoke(ctx, payload)
 }
 
-func (c *Client) RecommendProjectShape(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
-	if payload == nil {
-		payload = map[string]any{}
-	}
-	payload["command"] = "recommend-project-shape"
-	return c.Invoke(ctx, payload)
-}
-
 func (c *Client) RecommendRepositoryRoster(ctx context.Context, payload map[string]any) (json.RawMessage, error) {
 	if payload == nil {
 		payload = map[string]any{}
