@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -225,6 +226,77 @@ func (s *Server) architectureProposal(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(raw)
 }
 
+// recommendProjectShape is agent-first: ranked shape options for Blink Project Shape.
+func (s *Server) recommendProjectShape(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body map[string]any
+	_ = readJSON(r, &body)
+	projectName := strings.TrimSpace(fmt.Sprint(body["projectName"]))
+	actor := sessionEmail(r)
+
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 6*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, actor)
+	ownCancel()
+	if err == nil && projectName == "" {
+		projectName = p.ProjectName
+	}
+	if projectName == "" {
+		projectName = "project"
+	}
+	payload := s.advisoryPayload(r, projectName, id, body)
+	log.Printf("recommend-project-shape start project=%d actor=%q", id, actor)
+	raw, err := s.agent.RecommendProjectShape(r.Context(), payload)
+	if err != nil {
+		log.Printf("recommend-project-shape agent error project=%d err=%v", id, err)
+		writeErr(w, err)
+		return
+	}
+	log.Printf("recommend-project-shape ok project=%d bytes=%d", id, len(raw))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
+// recommendRepositoryRoster is agent-first: repository roster from requirement + shape.
+func (s *Server) recommendRepositoryRoster(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body map[string]any
+	_ = readJSON(r, &body)
+	projectName := strings.TrimSpace(fmt.Sprint(body["projectName"]))
+	actor := sessionEmail(r)
+
+	ownCtx, ownCancel := context.WithTimeout(r.Context(), 6*time.Second)
+	p, err := s.proj.RequireOwned(ownCtx, id, actor)
+	ownCancel()
+	if err == nil && projectName == "" {
+		projectName = p.ProjectName
+	}
+	if projectName == "" {
+		projectName = "project"
+	}
+	payload := s.advisoryPayload(r, projectName, id, body)
+	log.Printf(
+		"recommend-repository-roster start project=%d model=%q actor=%q",
+		id, strings.TrimSpace(fmt.Sprint(body["repositoryModel"])), actor,
+	)
+	raw, err := s.agent.RecommendRepositoryRoster(r.Context(), payload)
+	if err != nil {
+		log.Printf("recommend-repository-roster agent error project=%d err=%v", id, err)
+		writeErr(w, err)
+		return
+	}
+	log.Printf("recommend-repository-roster ok project=%d bytes=%d", id, len(raw))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
 // recommendTechnologyStack is agent-first: skip Neon so Technology can apply
 // AI-SDLC stack suggestions even when the pool is cold.
 func (s *Server) recommendTechnologyStack(w http.ResponseWriter, r *http.Request) {
@@ -248,13 +320,55 @@ func (s *Server) recommendTechnologyStack(w http.ResponseWriter, r *http.Request
 		projectName = "project"
 	}
 	payload := s.advisoryPayload(r, projectName, id, body)
+	repoCount := 0
+	if arr, ok := body["repositories"].([]any); ok {
+		repoCount = len(arr)
+	}
+	log.Printf(
+		"recommend-technology-stack start project=%d repos=%d topology=%q actor=%q",
+		id, repoCount, strings.TrimSpace(fmt.Sprint(body["topology"])), actor,
+	)
 	raw, err := s.agent.RecommendTechnologyStack(r.Context(), payload)
 	if err != nil {
+		log.Printf("recommend-technology-stack agent error project=%d err=%v", id, err)
 		writeErr(w, err)
 		return
 	}
+	log.Printf("recommend-technology-stack ok project=%d summary=%s", id, summarizeRecommendTechnologyStack(raw))
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(raw)
+}
+
+func summarizeRecommendTechnologyStack(raw json.RawMessage) string {
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return "unparseable_agent_json"
+	}
+	status, _ := root["status"].(string)
+	rows, _ := root["repoTechnologies"].([]any)
+	parts := make([]string, 0, len(rows)+1)
+	if status != "" {
+		parts = append(parts, "status="+status)
+	}
+	for _, item := range rows {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		repoID := strings.TrimSpace(fmt.Sprint(m["repoId"]))
+		rowStatus := strings.TrimSpace(fmt.Sprint(m["status"]))
+		lang := strings.TrimSpace(fmt.Sprint(m["language"]))
+		fw := strings.TrimSpace(fmt.Sprint(m["framework"]))
+		optN := 0
+		if opts, ok := m["technologyOptions"].([]any); ok {
+			optN = len(opts)
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s lang=%q fw=%q opts=%d", repoID, rowStatus, lang, fw, optN))
+	}
+	if len(parts) == 0 {
+		return "empty_summary"
+	}
+	return strings.Join(parts, " | ")
 }
 
 // confirmTopology is agent-first; Neon shape-gate write runs in the background.

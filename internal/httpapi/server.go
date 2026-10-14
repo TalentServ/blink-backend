@@ -148,6 +148,8 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				prr.Post("/{id}/sdlc-start", s.sdlcStart)
 				prr.Post("/{id}/sdlc-next", s.sdlcNext)
 				prr.Post("/{id}/architecture-proposal", s.architectureProposal)
+				prr.Post("/{id}/recommend-project-shape", s.recommendProjectShape)
+				prr.Post("/{id}/recommend-repository-roster", s.recommendRepositoryRoster)
 				prr.Post("/{id}/recommend-technology-stack", s.recommendTechnologyStack)
 				prr.Post("/{id}/confirm-topology", s.confirmTopology)
 				prr.Post("/{id}/jira-gate-evidence", s.jiraGateEvidence)

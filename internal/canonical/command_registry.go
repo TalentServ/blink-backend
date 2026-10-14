@@ -136,6 +136,8 @@ func defaultCommandRegistry() *CommandRegistry {
 		spec("dependency-graph", CommandModeAgent, "planning", "sdlc-plan", GateProductScopeConfirmed),
 		spec("propose-designs", CommandModeAgent, "architecture", "project-shape", GateProductScopeConfirmed),
 		spec("architecture-proposal", CommandModeAgent, "architecture", ""),
+		spec("recommend-project-shape", CommandModeAgent, "architecture", ""),
+		spec("recommend-repository-roster", CommandModeAgent, "architecture", ""),
 		spec("recommend-technology-stack", CommandModeAgent, "architecture", ""),
 		spec("confirm-topology", CommandModeHybrid, "architecture", ""),
 		spec("implement-step", CommandModeAgent, "delivery", "ship", GateProductScopeConfirmed),
