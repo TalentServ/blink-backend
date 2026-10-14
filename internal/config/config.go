@@ -84,7 +84,7 @@ func Load() (Config, error) {
 	c := Config{
 		Port:               env("PORT", "8090"),
 		DatabaseURL:        firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("SPRING_DATASOURCE_URL"), "postgres://blink:blink@localhost:5432/blink?sslmode=disable"),
-		CORSOrigins:        splitCSV(env("BLINK_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")),
+		CORSOrigins:        splitCSV(env("BLINK_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")),
 		AgentRuntimeURL:    env("BLINK_AGENT_RUNTIME_URL", "https://z5i3yybrx1.execute-api.us-west-2.amazonaws.com"),
 		AgentRuntimeToken:  os.Getenv("BLINK_AGENT_RUNTIME_TOKEN"),
 		AgentLambdaName:    env("BLINK_AGENT_RUNTIME_LAMBDA_FUNCTION", "blink-agent-runtime"),
@@ -168,11 +168,14 @@ func (c Config) GmailConfigured() bool {
 		strings.TrimSpace(c.GmailRefreshToken) != ""
 }
 
-// LocalMail shows the OTP on screen and skips SMTP while a login gate is set.
+// LocalMail shows the OTP on screen and skips outbound email (dev / gated login).
 // Gmail OAuth or BLINK_SMTP_ENABLED=true sends real email instead.
 func (c Config) LocalMail() bool {
 	if c.SMTPEnabled || c.GmailConfigured() {
 		return false
+	}
+	if c.OTPReveal {
+		return true
 	}
 	return strings.TrimSpace(c.LoginGate) != ""
 }

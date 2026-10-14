@@ -55,7 +55,7 @@ func (s *Service) Config() map[string]any {
 	return map[string]any{
 		"allowedDomain": s.cfg.LoginAllowedDomain,
 		"gateRequired":  strings.TrimSpace(s.cfg.LoginGate) != "",
-		"otpReveal":     s.cfg.LocalMail(),
+		"otpReveal":     s.cfg.OTPReveal || s.cfg.LocalMail(),
 	}
 }
 
@@ -86,7 +86,12 @@ func (s *Service) RequestOTP(ctx context.Context, req OTPRequest) (*OTPRequestRe
 	var lastSent time.Time
 	_ = s.pool.QueryRow(dbCtx, `SELECT last_sent_at FROM blink_otp_challenge WHERE email=$1`, email).Scan(&lastSent)
 	if !lastSent.IsZero() && time.Since(lastSent) < s.cfg.OTPResendCooldown {
-		return nil, fmt.Errorf("%w: wait before requesting another code", ErrBadRequest)
+		wait := s.cfg.OTPResendCooldown - time.Since(lastSent)
+		secs := int(wait.Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		return nil, fmt.Errorf("%w: wait %d seconds before requesting another code", ErrBadRequest, secs)
 	}
 	otp, err := randomDigits(6)
 	if err != nil {
