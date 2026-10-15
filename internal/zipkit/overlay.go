@@ -2,14 +2,27 @@ package zipkit
 
 import "strings"
 
+const productScopePrefix = ".cursor/ai-sdlc/product-scope/"
+
 // MergeOverlays copies base then overlay. Overlay wins on the same path.
-// Paths that fail SanitizeOverlayPath are dropped.
+// Paths that fail SanitizeOverlayPath are dropped. Product scope is one
+// revision: when overlay carries it, base product-scope files are not mixed in.
 func MergeOverlays(base, overlay map[string]string) map[string]string {
+	overlayOwnsScope := false
+	for path := range overlay {
+		if strings.HasPrefix(SanitizeOverlayPath(path), productScopePrefix) {
+			overlayOwnsScope = true
+			break
+		}
+	}
 	out := make(map[string]string)
-	for _, src := range []map[string]string{base, overlay} {
+	for i, src := range []map[string]string{base, overlay} {
 		for path, content := range src {
 			rel := SanitizeOverlayPath(path)
 			if rel == "" || IsPrematureWorkPlanOverlay(rel) {
+				continue
+			}
+			if i == 0 && overlayOwnsScope && strings.HasPrefix(rel, productScopePrefix) {
 				continue
 			}
 			out[rel] = content

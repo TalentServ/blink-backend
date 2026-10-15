@@ -152,6 +152,7 @@ func (s *Server) confirmProductScope(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
+			s.persistAgentOverlaysCtx(ctx, projectName, id, raw)
 			_ = s.afterProductScopeConfirm(ctx, id, actor, payload, raw)
 		}()
 		w.Header().Set("Content-Type", "application/json")
@@ -188,6 +189,7 @@ func (s *Server) confirmProductScope(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
+		s.persistAgentOverlaysCtx(ctx, projectName, id, raw)
 		_ = s.afterProductScopeConfirm(ctx, id, actor, payload, raw)
 	}()
 	w.Header().Set("Content-Type", "application/json")
