@@ -136,6 +136,13 @@ func (s *Server) downloadProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if scope, ok := blinkCtx["productScope"].(map[string]any); ok {
+		snapshot, _ := scope["requirementSnapshot"].(string)
+		files, _ := blinkCtx["scopeOverlays"].([]any)
+		log.Printf("download project=%d scopeStatus=%v snapshotChars=%d scopeFiles=%d", id, scope["status"], len(snapshot), len(files))
+	} else {
+		log.Printf("download project=%d no confirmed productScope in setupContext", id)
+	}
 
 	kitPath, err := s.ensureWorkspaceKit(r.Context())
 	if err != nil {

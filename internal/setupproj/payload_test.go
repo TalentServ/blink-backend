@@ -42,6 +42,23 @@ func TestHostedPayloadMapsWizardContext(t *testing.T) {
 	}
 }
 
+func TestHostedPayloadForwardsConfirmedScope(t *testing.T) {
+	out := HostedPayload("Fitoyo App", "", "42", "", "# req\n", map[string]any{
+		"productScope": map[string]any{"status": "confirmed", "requirementSnapshot": "# req\n"},
+		"scopeOverlays": []any{
+			map[string]any{"path": ".cursor/ai-sdlc/product-scope/product-scope.yaml", "content": "status: CONFIRMED\n"},
+		},
+	})
+	scope, _ := out["productScope"].(map[string]any)
+	if scope["status"] != "confirmed" {
+		t.Fatalf("productScope=%v", out["productScope"])
+	}
+	files, _ := out["overlayFiles"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("overlayFiles=%v", out["overlayFiles"])
+	}
+}
+
 func TestHasRequired(t *testing.T) {
 	files := map[string]string{}
 	for _, p := range RequiredFiles {

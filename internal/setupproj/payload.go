@@ -207,4 +207,12 @@ func copyBlinkContext(out map[string]any, ctx map[string]any) {
 	if len(handles) > 0 {
 		out["integration_handles"] = handles
 	}
+
+	// Lets setup keep the scope the operator confirmed instead of re-planning it.
+	if scope := asMap(ctx["productScope"]); scope != nil {
+		out["productScope"] = scope
+	}
+	if files := asSlice(ctx["scopeOverlays"]); len(files) > 0 {
+		out["overlayFiles"] = files
+	}
 }
