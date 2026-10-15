@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -113,6 +114,51 @@ func pickAppRepos(org string, repos []repoRef) []struct{ Owner, Repo, Kind strin
 			continue
 		}
 		out = append(out, struct{ Owner, Repo, Kind string }{Owner: owner, Repo: repo, Kind: kind})
+	}
+	return out
+}
+
+func filesForRepo(repos []struct{ Owner, Repo, Kind string }, byHint map[string][]githubgit.File, index int, kind string) []githubgit.File {
+	if len(repos) == 1 {
+		if index != 0 {
+			return nil
+		}
+		all := make([]githubgit.File, 0)
+		for _, group := range byHint {
+			all = append(all, group...)
+		}
+		return all
+	}
+	files := append([]githubgit.File{}, byHint[kind]...)
+	if kind == "backend" {
+		for hint, group := range byHint {
+			if hint == "frontend" || hint == "backend" {
+				continue
+			}
+			files = append(files, group...)
+		}
+	}
+	return files
+}
+
+func (s *Server) reposForImplement(ctx context.Context, projectID int64, bodyRepos []repoRef) []repoRef {
+	if len(bodyRepos) > 0 {
+		return bodyRepos
+	}
+	if s.canonical == nil {
+		return bodyRepos
+	}
+	rows, err := s.canonical.LoadRepositoryRoster(ctx, projectID)
+	if err != nil || len(rows) == 0 {
+		return bodyRepos
+	}
+	out := make([]repoRef, 0, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(row.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, repoRef{Name: name, HTMLURL: row.HTMLURL, Purpose: row.Purpose})
 	}
 	return out
 }
@@ -331,8 +377,13 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		b, _ := json.Marshal(arr)
 		_ = json.Unmarshal(b, &reposIn)
 	}
+	reposIn = s.reposForImplement(r.Context(), id, reposIn)
 	token, org, ok := s.integ.GitHubCreds(r.Context(), id)
-	appRepos := pickAppRepos(org, reposIn)
+	ownerName := org
+	if ok && strings.TrimSpace(ownerName) == "" {
+		ownerName, _ = githubgit.New(token).CurrentUserLogin(r.Context())
+	}
+	appRepos := pickAppRepos(ownerName, reposIn)
 	byHint := map[string][]githubgit.File{}
 	codeFileCount := 0
 	for _, item := range filesRaw {
@@ -367,11 +418,8 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		evidence["hint"] = "Agent returned markdown/docs only (no LLM source patches). Point BLINK_AGENT_RUNTIME_URL at a runtime with LLM_API_KEY, then re-run implement-step."
 	} else if ok && len(appRepos) > 0 && len(byHint) > 0 {
 		gh := githubgit.New(token)
-		for _, target := range appRepos {
-			files := byHint[target.Kind]
-			if len(files) == 0 && target.Kind == "backend" {
-				files = byHint["backend"]
-			}
+		for i, target := range appRepos {
+			files := filesForRepo(appRepos, byHint, i, target.Kind)
 			if len(files) == 0 {
 				continue
 			}
@@ -425,18 +473,31 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 	)
 
 	msg := "Implementation agent completed."
+	status := "ok"
 	if len(prs) > 0 {
 		msg = fmt.Sprintf("Opened %d draft PR(s) for implement-step.", len(prs))
 	} else if skip, _ := evidence["draftPrSkipped"].(string); skip == "docs_only_stub" {
-		msg = "No real implementation yet — agent returned markdown stub only (LLM key missing or unavailable). Fix agent LLM config and re-run Implementation."
+		status = "error"
+		msg = "No product source changes were generated, so no draft PR was opened."
+	} else if skip, _ := evidence["draftPrSkipped"].(string); skip == "app_repos_missing" {
+		status = "error"
+		msg = "No draft PR was opened because the application repository was not found."
+	} else if skip, _ := evidence["draftPrSkipped"].(string); skip == "github_token_missing" {
+		status = "error"
+		msg = "No draft PR was opened because GitHub is not connected."
 	} else if skip, _ := evidence["draftPrSkipped"].(string); skip != "" {
-		msg = "Implementation agent completed. Draft PRs were skipped (" + skip + "); continue to Review & PR."
+		status = "error"
+		msg = "No draft PR was opened (" + skip + ")."
 	} else if errMsg, _ := evidence["draftPrError"].(string); errMsg != "" {
-		msg = "Implementation agent completed. Draft PR could not be opened: " + errMsg
+		status = "error"
+		msg = "Draft PR could not be opened: " + errMsg
+	} else if len(prs) == 0 {
+		status = "error"
+		msg = "No draft PR was opened."
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":            "ok",
+		"status":            status,
 		"message":           msg,
 		"implementStep":     impl,
 		"draftPullRequests": prs,
