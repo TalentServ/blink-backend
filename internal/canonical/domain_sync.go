@@ -114,6 +114,36 @@ func strField(m map[string]any, key string) string {
 	return strings.TrimSpace(v)
 }
 
+func (s *Service) LoadRepositoryRoster(ctx context.Context, projectID int64) ([]RepositoryRow, error) {
+	if s == nil || s.pool == nil || projectID <= 0 {
+		return nil, nil
+	}
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT roster_json FROM blink_repository_roster WHERE project_id=$1
+	`, projectID).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var doc struct {
+		Repos []RepositoryRow `json:"repos"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	if len(doc.Repos) > 0 {
+		return doc.Repos, nil
+	}
+	var rows []RepositoryRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, nil
+	}
+	return rows, nil
+}
+
 func (s *Service) SyncRepositoryRoster(ctx context.Context, projectID int64, wizardState []byte) error {
 	root := parseWizard(wizardState)
 	repos, topology := parseRepositories(root)
