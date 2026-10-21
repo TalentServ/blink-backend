@@ -26,6 +26,7 @@ var (
 	sourceEpicRe  = regexp.MustCompile(`(?m)^Source epic:\s*(\S+)\s*$`)
 	sourceStoryRe = regexp.MustCompile(`(?m)^Source story:\s*(\S+)\s*$`)
 	figmaTeamRe   = regexp.MustCompile(`(?:/files)?/team/(\d+)`)
+	satisfyFRRe   = regexp.MustCompile(`(?i)^satisfy\s+(?:fr|nfr)[-.\d]+\s*:\s*`)
 )
 
 type Service struct {
@@ -768,7 +769,7 @@ func (s *Service) CreateJiraIssues(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		id := str(epic["id"])
-		desc := strings.TrimSpace(str(epic["objective"]))
+		desc := buildEpicDescription(epic)
 		if id != "" {
 			if desc != "" {
 				desc += "\n"
@@ -2102,6 +2103,31 @@ func jiraDeleteBlockedByOtherIssues(err error) bool {
 		(strings.Contains(low, "must delete") && strings.Contains(low, "child"))
 }
 
+func cleanAcceptanceLine(line string) string {
+	return strings.TrimSpace(satisfyFRRe.ReplaceAllString(strings.TrimSpace(line), ""))
+}
+
+func buildEpicDescription(epic map[string]any) string {
+	var b strings.Builder
+	title := strings.TrimSpace(str(epic["title"]))
+	objective := strings.TrimSpace(str(epic["objective"]))
+	if objective != "" && !strings.EqualFold(objective, title) {
+		b.WriteString(objective)
+		b.WriteByte('\n')
+	}
+	if stories, ok := epic["storyTitles"].([]any); ok && len(stories) > 0 {
+		b.WriteString("Stories:")
+		for _, item := range stories {
+			line := strings.TrimSpace(fmt.Sprint(item))
+			if line != "" {
+				b.WriteString("\n- " + line)
+			}
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func buildStoryDescription(story map[string]any) string {
 	var b strings.Builder
 	asA, iWant, soThat := str(story["asA"]), str(story["iWant"]), str(story["soThat"])
@@ -2118,7 +2144,7 @@ func buildStoryDescription(story map[string]any) string {
 	if ac, ok := story["acceptanceCriteria"].([]any); ok && len(ac) > 0 {
 		b.WriteString("Acceptance criteria:")
 		for _, item := range ac {
-			line := strings.TrimSpace(fmt.Sprint(item))
+			line := cleanAcceptanceLine(fmt.Sprint(item))
 			if line != "" {
 				b.WriteString("\n- " + line)
 			}
