@@ -489,6 +489,11 @@ func (c *Client) ChatTurnStream(ctx context.Context, payload map[string]any, onT
 
 // CommandStream POSTs to agent /sdlc/stream and forwards thinking deltas.
 func (c *Client) CommandStream(ctx context.Context, payload map[string]any, onThinking func(string) error) (json.RawMessage, error) {
+	return c.CommandStreamEvents(ctx, payload, onThinking, nil)
+}
+
+// CommandStreamEvents POSTs to agent /sdlc/stream and forwards thinking deltas plus incremental events.
+func (c *Client) CommandStreamEvents(ctx context.Context, payload map[string]any, onThinking func(string) error, onEvent func(event string, data json.RawMessage) error) (json.RawMessage, error) {
 	if strings.TrimSpace(c.cfg.AgentRuntimeToken) == "" {
 		return nil, fmt.Errorf("BLINK_AGENT_RUNTIME_TOKEN is not configured")
 	}
@@ -538,6 +543,11 @@ func (c *Client) CommandStream(ctx context.Context, payload map[string]any, onTh
 				return nil
 			}
 			return onThinking(payload.Text)
+		case "questions":
+			if onEvent != nil {
+				return onEvent(event, append(json.RawMessage(nil), data...))
+			}
+			return nil
 		case "error":
 			return nil
 		case "done":
@@ -558,6 +568,10 @@ func (c *Client) CommandStream(ctx context.Context, payload map[string]any, onTh
 }
 
 func (c *Client) ClarifyStream(ctx context.Context, body map[string]any, onThinking func(string) error) (json.RawMessage, error) {
+	return c.ClarifyStreamEvents(ctx, body, onThinking, nil)
+}
+
+func (c *Client) ClarifyStreamEvents(ctx context.Context, body map[string]any, onThinking func(string) error, onEvent func(event string, data json.RawMessage) error) (json.RawMessage, error) {
 	if body == nil {
 		body = map[string]any{}
 	}
@@ -565,7 +579,7 @@ func (c *Client) ClarifyStream(ctx context.Context, body map[string]any, onThink
 	if _, ok := body["mode"]; !ok {
 		body["mode"] = "discovery"
 	}
-	raw, err := c.CommandStream(ctx, body, onThinking)
+	raw, err := c.CommandStreamEvents(ctx, body, onThinking, onEvent)
 	if err == nil {
 		return raw, nil
 	}
