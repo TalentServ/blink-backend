@@ -368,12 +368,22 @@ func (s *Server) groomClarify(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, fmt.Errorf("streaming is not supported on this connection"))
 			return
 		}
-		raw, err := s.agent.ClarifyStream(r.Context(), body, func(delta string) error {
-			if !writeSSE("thinking", map[string]any{"text": delta}) {
-				return fmt.Errorf("client disconnected")
-			}
-			return nil
-		})
+		raw, err := s.agent.ClarifyStreamEvents(
+			r.Context(),
+			body,
+			func(delta string) error {
+				if !writeSSE("thinking", map[string]any{"text": delta}) {
+					return fmt.Errorf("client disconnected")
+				}
+				return nil
+			},
+			func(event string, data json.RawMessage) error {
+				if !writeSSE(event, data) {
+					return fmt.Errorf("client disconnected")
+				}
+				return nil
+			},
+		)
 		if err != nil {
 			_ = writeSSE("error", map[string]any{"message": err.Error()})
 			return
