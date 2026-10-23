@@ -116,9 +116,11 @@ func main() {
 			case <-stop:
 				return
 			case <-ticker.C:
-				if err := canonicalSvc.ProcessQueuedProjections(context.Background(), 20); err != nil {
+				wCtx, wCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := canonicalSvc.ProcessQueuedProjections(wCtx, 20); err != nil {
 					log.Printf("projection worker: %v", err)
 				}
+				wCancel()
 			}
 		}
 	}()

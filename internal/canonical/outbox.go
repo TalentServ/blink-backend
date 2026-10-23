@@ -66,7 +66,7 @@ func (s *Service) ProcessQueuedProjections(ctx context.Context, limit int) error
 		limit = 10
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, project_id, provider, action_type, payload_json
+		SELECT id
 		FROM blink_projection_outbox
 		WHERE status='queued'
 		ORDER BY id ASC
@@ -75,17 +75,24 @@ func (s *Service) ProcessQueuedProjections(ctx context.Context, limit int) error
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var ids []int64
 	for rows.Next() {
-		var id, projectID int64
-		var provider, action string
-		var payload []byte
-		if err := rows.Scan(&id, &projectID, &provider, &action, &payload); err != nil {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, id := range ids {
 		_, _ = s.pool.Exec(ctx, `UPDATE blink_projection_outbox SET status='running', updated_at=NOW() WHERE id=$1`, id)
 		// Provider handlers perform the external mutation; outbox records audit + retry metadata.
 		_ = s.MarkProjectionResult(ctx, id, true, map[string]string{"note": "projection recorded; external call handled by API handler"}, "")
 	}
-	return rows.Err()
+	return nil
 }
