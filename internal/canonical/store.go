@@ -392,7 +392,6 @@ func (s *Service) importWizardTx(ctx context.Context, tx pgx.Tx, projectID int64
 	err := tx.QueryRow(ctx, `
 		SELECT wizard_step, wizard_completed_through, wizard_state_json
 		FROM project WHERE id=$1
-		FOR UPDATE
 	`, projectID).Scan(&step, &through, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("project not found")
@@ -426,30 +425,17 @@ func (s *Service) RefreshEligibility(ctx context.Context, projectID int64, actor
 }
 
 func (s *Service) refreshFromWizard(ctx context.Context, projectID int64, actorEmail, correlationID string) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err := s.refreshFromWizardTx(ctx, tx, projectID, actorEmail, correlationID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID int64, actorEmail, correlationID string) error {
 	var step *string
 	var through *int
 	var state []byte
 	var revision int64
 	var prevDigest string
-	err := tx.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 		SELECT p.wizard_step, p.wizard_completed_through, p.wizard_state_json,
 			COALESCE(a.revision, 0), COALESCE(a.wizard_digest, '')
 		FROM project p
 		LEFT JOIN blink_project_aggregate a ON a.project_id = p.id
 		WHERE p.id=$1
-		FOR UPDATE OF p
 	`, projectID).Scan(&step, &through, &state, &revision, &prevDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("project not found")
@@ -457,19 +443,12 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 	if err != nil {
 		return err
 	}
-	// Lock the aggregate row so concurrent syncs cannot assign the same next revision.
-	if revision > 0 {
-		err = tx.QueryRow(ctx, `
-			SELECT revision, wizard_digest FROM blink_project_aggregate WHERE project_id=$1 FOR UPDATE
-		`, projectID).Scan(&revision, &prevDigest)
-		if err != nil {
-			return err
-		}
-	}
 	digest := DigestBytes(state)
 	if digest == prevDigest && revision > 0 {
 		return nil
 	}
+	// Run domain syncs outside any open transaction so we never hold a pool connection
+	// (or a FOR UPDATE lock on project) while acquiring a second connection for child inserts.
 	_ = s.SyncGroomingSession(ctx, projectID, state)
 	_ = s.SyncRepositoryRoster(ctx, projectID, state)
 	_ = s.SyncRepoTechnologies(ctx, projectID, state)
@@ -482,8 +461,13 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 	EnrichShipEligibility(ctx, s.pool, projectID, &elig)
 	eligRaw, _ := json.Marshal(elig)
 	if revision == 0 {
-		return s.importWizardTx(ctx, tx, projectID, actorEmail, correlationID)
+		return s.importWizard(ctx, projectID, actorEmail, correlationID)
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
 	// Atomic bump — never write a guessed nextRev that another sync already claimed.
 	var nextRev int64
 	err = tx.QueryRow(ctx, `
@@ -493,19 +477,20 @@ func (s *Service) refreshFromWizardTx(ctx context.Context, tx pgx.Tx, projectID 
 		RETURNING revision
 	`, projectID, digest, eligRaw).Scan(&nextRev)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Another writer already synced this digest while we held locks / ran domain sync.
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	payload, _ := json.Marshal(map[string]any{"wizardDigest": digest, "eligibility": elig})
-	_, err = tx.Exec(ctx, `
+	if _, err = tx.Exec(ctx, `
 		INSERT INTO blink_domain_event (project_id, revision, event_type, payload_json, actor_email, correlation_id)
 		VALUES ($1, $2, 'wizard.synced', $3, NULLIF($4,''), NULLIF($5,''))
 		ON CONFLICT (project_id, revision) DO NOTHING
-	`, projectID, nextRev, payload, actorEmail, correlationID)
-	return err
+	`, projectID, nextRev, payload, actorEmail, correlationID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Service) loadSnapshotTx(ctx context.Context, tx pgx.Tx, projectID int64) (*Snapshot, error) {

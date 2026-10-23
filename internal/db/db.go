@@ -16,12 +16,12 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
-	// Neon pooler: allow a few concurrent saves without letting hung work exhaust the project.
-	cfg.MaxConns = 8
+	// Neon pooler: allow concurrent saves + background sync without exhausting the project.
+	cfg.MaxConns = 16
 	cfg.MinConns = 0
-	cfg.MaxConnLifetime = 30 * time.Minute
-	cfg.MaxConnIdleTime = 2 * time.Minute
-	cfg.HealthCheckPeriod = 30 * time.Second
+	cfg.MaxConnLifetime = 10 * time.Minute
+	cfg.MaxConnIdleTime = 90 * time.Second
+	cfg.HealthCheckPeriod = 15 * time.Second
 	if cfg.ConnConfig != nil {
 		cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 		// Cap statement runtime so one cold query cannot hold a pool slot for minutes.

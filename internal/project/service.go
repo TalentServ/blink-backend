@@ -175,20 +175,29 @@ func (s *Service) List(ctx context.Context) ([]ProjectResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []ProjectResponse
+	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var out []ProjectResponse
+	for _, id := range ids {
 		p, err := s.Get(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Service) ListMine(ctx context.Context, ownerEmail string) ([]ProjectResponse, error) {
@@ -196,20 +205,29 @@ func (s *Service) ListMine(ctx context.Context, ownerEmail string) ([]ProjectRes
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []ProjectResponse
+	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var out []ProjectResponse
+	for _, id := range ids {
 		p, err := s.Get(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Service) LatestForOwner(ctx context.Context, ownerEmail string) (*ProjectResponse, error) {
