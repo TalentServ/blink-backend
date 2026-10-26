@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,118 @@ func TestCurrentUserLoginResolvesPersonalRepositoryOwner(t *testing.T) {
 	}
 	if login != "calculator-owner" {
 		t.Fatalf("CurrentUserLogin = %q, want calculator-owner", login)
+	}
+}
+
+func TestCommitBranchAndDraftPRClosesExistingPull(t *testing.T) {
+	t.Parallel()
+
+	const branch = "blink/implement-STORY"
+	var closed int
+	var createdPRs int
+	var forcedReset bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/app/git/ref/heads/main", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "base-sha"}})
+	})
+	mux.HandleFunc("/repos/acme/app/pulls", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if !strings.Contains(r.URL.Query().Get("head"), "blink/implement-STORY") {
+				t.Errorf("head filter = %q", r.URL.Query().Get("head"))
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 4, "html_url": "https://github.com/acme/app/pull/4"}})
+		case http.MethodPost:
+			createdPRs++
+			if closed == 0 {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"message":"A pull request already exists for acme:blink/implement-STORY."}]}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number":   9,
+				"html_url": "https://github.com/acme/app/pull/9",
+			})
+		default:
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/repos/acme/app/pulls/4", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["state"] != "closed" {
+			t.Errorf("close state = %v", body["state"])
+		}
+		closed++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"number":4,"state":"closed"}`))
+	})
+	mux.HandleFunc("/repos/acme/app/git/refs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Reference already exists"}`))
+	})
+	mux.HandleFunc("/repos/acme/app/git/ref/heads/"+branch, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "base-sha"}})
+	})
+	mux.HandleFunc("/repos/acme/app/git/refs/heads/"+branch, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "base-sha"}})
+			return
+		}
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["force"] == true && body["sha"] == "base-sha" {
+			forcedReset = true
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/repos/acme/app/git/commits/base-sha", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"tree": map[string]any{"sha": "tree-base"}})
+	})
+	mux.HandleFunc("/repos/acme/app/git/blobs", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "blob-sha"})
+	})
+	mux.HandleFunc("/repos/acme/app/git/trees", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "tree-sha"})
+	})
+	mux.HandleFunc("/repos/acme/app/git/commits", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "commit-sha", "html_url": "https://github.com/acme/app/commit/commit-sha"})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New("token")
+	c.baseURL = srv.URL
+	got, err := c.CommitBranchAndDraftPR(context.Background(), "acme", "app", branch, "main", "title", "body", "msg", []File{
+		{Path: "src/app.ts", Content: "export const n = 1\n"},
+	})
+	if err != nil {
+		t.Fatalf("CommitBranchAndDraftPR: %v", err)
+	}
+	if closed == 0 {
+		t.Fatal("expected the existing draft PR to be closed")
+	}
+	if !forcedReset {
+		t.Fatal("expected the implement branch to reset to the default branch")
+	}
+	if got.Number != 9 || got.URL != "https://github.com/acme/app/pull/9" {
+		t.Fatalf("new draft = %+v", got)
+	}
+	if createdPRs < 1 {
+		t.Fatal("expected a new draft PR")
 	}
 }
