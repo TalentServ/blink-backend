@@ -374,6 +374,10 @@ func (c *Client) CommitBranchAndDraftPR(ctx context.Context, owner, repo, branch
 	if baseSHA == "" {
 		return nil, fmt.Errorf("base branch has empty sha")
 	}
+	if err := c.closeOpenPullsForHead(ctx, owner, repo, branch); err != nil {
+		return nil, err
+	}
+
 	status, raw, err = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), map[string]any{
 		"ref": "refs/heads/" + branch,
 		"sha": baseSHA,
@@ -382,7 +386,18 @@ func (c *Client) CommitBranchAndDraftPR(ctx context.Context, owner, repo, branch
 		return nil, err
 	}
 	if status == 422 {
-		// Branch may already exist — continue and commit onto it.
+		// Branch already exists from an earlier implement. Point it at the current default tip
+		// so this run replaces that implementation instead of stacking on it.
+		status, raw, err = c.do(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", owner, repo, branch), map[string]any{
+			"sha":   baseSHA,
+			"force": true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if status >= 400 {
+			return nil, fmt.Errorf("reset implement branch HTTP %d: %s", status, truncate(string(raw), 200))
+		}
 	} else if status >= 400 {
 		return nil, fmt.Errorf("create branch HTTP %d: %s", status, truncate(string(raw), 200))
 	}
@@ -401,6 +416,21 @@ func (c *Client) CommitBranchAndDraftPR(ctx context.Context, owner, repo, branch
 	})
 	if err != nil {
 		return nil, err
+	}
+	if status == 422 && strings.Contains(strings.ToLower(string(raw)), "pull request already exists") {
+		if cerr := c.closeOpenPullsForHead(ctx, owner, repo, branch); cerr != nil {
+			return nil, cerr
+		}
+		status, raw, err = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), map[string]any{
+			"title": title,
+			"head":  branch,
+			"base":  baseBranch,
+			"body":  body,
+			"draft": true,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if status >= 400 {
 		return nil, fmt.Errorf("create draft PR HTTP %d: %s", status, truncate(string(raw), 240))
@@ -421,6 +451,43 @@ func (c *Client) CommitBranchAndDraftPR(ctx context.Context, owner, repo, branch
 		Repo:   repo,
 		SHA:    commit.SHA,
 	}, nil
+}
+
+func (c *Client) closeOpenPullsForHead(ctx context.Context, owner, repo, branch string) error {
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("head", owner+":"+branch)
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls?%s", owner, repo, q.Encode()), nil)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("list pull requests HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var pulls []map[string]any
+	if err := json.Unmarshal(raw, &pulls); err != nil {
+		return fmt.Errorf("list pull requests: %w", err)
+	}
+	for _, pr := range pulls {
+		number := 0
+		switch n := pr["number"].(type) {
+		case float64:
+			number = int(n)
+		}
+		if number <= 0 {
+			continue
+		}
+		status, raw, err = c.do(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), map[string]any{
+			"state": "closed",
+		})
+		if err != nil {
+			return err
+		}
+		if status >= 400 {
+			return fmt.Errorf("close pull request #%d HTTP %d: %s", number, status, truncate(string(raw), 200))
+		}
+	}
+	return nil
 }
 
 func (c *Client) CombinedStatus(ctx context.Context, owner, repo, ref string) (string, string, error) {
