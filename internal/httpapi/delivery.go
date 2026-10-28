@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
@@ -116,6 +118,115 @@ func pickAppRepos(org string, repos []repoRef) []struct{ Owner, Repo, Kind strin
 		out = append(out, struct{ Owner, Repo, Kind string }{Owner: owner, Repo: repo, Kind: kind})
 	}
 	return out
+}
+
+func classifyRepoHint(path, hint string) string {
+	hint = strings.ToLower(strings.TrimSpace(hint))
+	if hint != "frontend" && hint != "backend" {
+		hint = ""
+	}
+	lower := strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case strings.HasSuffix(lower, ".tsx"),
+		strings.HasSuffix(lower, ".jsx"),
+		strings.HasSuffix(lower, ".vue"),
+		strings.HasSuffix(lower, ".css"),
+		strings.HasSuffix(lower, ".html"),
+		strings.Contains(lower, "/frontend/"),
+		strings.HasPrefix(lower, "frontend/"):
+		return "frontend"
+	case hint == "frontend":
+		return "frontend"
+	default:
+		return "backend"
+	}
+}
+
+func implementBaseBranch(ctx context.Context, gh *githubgit.Client, owner, repo string) string {
+	sha, err := gh.BranchSHA(ctx, owner, repo, implementAllBranch)
+	if err != nil || sha == "" {
+		return ""
+	}
+	return implementAllBranch
+}
+
+func currentApplication(ctx context.Context, gh *githubgit.Client, repos []struct{ Owner, Repo, Kind string }) []map[string]any {
+	out := make([]map[string]any, 0, 24)
+	total := 0
+	for _, repo := range repos {
+		if len(out) >= 24 || total >= 150_000 {
+			break
+		}
+		sha, err := gh.BranchSHA(ctx, repo.Owner, repo.Repo, implementAllBranch)
+		if err != nil || sha == "" {
+			continue
+		}
+		paths, err := gh.TreePaths(ctx, repo.Owner, repo.Repo, sha)
+		if err != nil {
+			continue
+		}
+		sort.SliceStable(paths, func(i, j int) bool {
+			return snapshotRank(paths[i]) < snapshotRank(paths[j])
+		})
+		for _, repoPath := range paths {
+			if len(out) >= 24 || total >= 150_000 {
+				break
+			}
+			if !implementContextSource(repoPath) {
+				continue
+			}
+			got, ferr := gh.FileBytes(ctx, repo.Owner, repo.Repo, sha, repoPath)
+			if ferr != nil || len(got) == 0 || len(got) > 40_000 || !utf8.Valid(got) {
+				continue
+			}
+			total += len(got)
+			out = append(out, map[string]any{
+				"owner":   repo.Owner,
+				"repo":    repo.Repo,
+				"kind":    repo.Kind,
+				"path":    repoPath,
+				"content": string(got),
+			})
+		}
+	}
+	return out
+}
+
+func snapshotRank(path string) int {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, "/app.tsx"), strings.HasSuffix(lower, "/app.jsx"), lower == "app.tsx", lower == "app.jsx":
+		return 0
+	case strings.Contains(lower, "controller"), strings.Contains(lower, "service"):
+		return 1
+	default:
+		return 2
+	}
+}
+
+func implementContextSource(path string) bool {
+	lower := strings.ToLower(strings.TrimSpace(path))
+	if lower == "" || strings.Contains(lower, "..") || strings.Contains(lower, "node_modules/") {
+		return false
+	}
+	if strings.Contains(lower, ".test.") || strings.Contains(lower, ".spec.") || strings.Contains(lower, "/dist/") {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(lower, ".tsx"),
+		strings.HasSuffix(lower, ".ts"),
+		strings.HasSuffix(lower, ".jsx"),
+		strings.HasSuffix(lower, ".js"),
+		strings.HasSuffix(lower, ".vue"),
+		strings.HasSuffix(lower, ".css"),
+		strings.HasSuffix(lower, ".html"),
+		strings.HasSuffix(lower, ".java"),
+		strings.HasSuffix(lower, ".py"),
+		strings.HasSuffix(lower, ".go"):
+		return true
+	default:
+		return false
+	}
 }
 
 func filesForRepo(repos []struct{ Owner, Repo, Kind string }, byHint map[string][]githubgit.File, index int, kind string) []githubgit.File {
@@ -333,6 +444,23 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reposIn := []repoRef{}
+	if arr, ok := body["repositories"].([]any); ok {
+		b, _ := json.Marshal(arr)
+		_ = json.Unmarshal(b, &reposIn)
+	}
+	reposIn = s.reposForImplement(r.Context(), id, reposIn)
+	token, org, credsOK := s.integ.GitHubCreds(r.Context(), id)
+	ownerName := org
+	if credsOK && strings.TrimSpace(ownerName) == "" {
+		ownerName, _ = githubgit.New(token).CurrentUserLogin(r.Context())
+	}
+	appRepos := pickAppRepos(ownerName, reposIn)
+	if credsOK {
+		if current := currentApplication(r.Context(), githubgit.New(token), appRepos); len(current) > 0 {
+			body["currentApplication"] = current
+		}
+	}
 	payload := s.advisoryPayload(r, p.ProjectName, id, body)
 	raw, err := s.agent.ImplementStep(r.Context(), payload)
 	if err != nil {
@@ -372,18 +500,6 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		commitMsg = "feat: blink implement-step"
 	}
 
-	reposIn := []repoRef{}
-	if arr, ok := body["repositories"].([]any); ok {
-		b, _ := json.Marshal(arr)
-		_ = json.Unmarshal(b, &reposIn)
-	}
-	reposIn = s.reposForImplement(r.Context(), id, reposIn)
-	token, org, ok := s.integ.GitHubCreds(r.Context(), id)
-	ownerName := org
-	if ok && strings.TrimSpace(ownerName) == "" {
-		ownerName, _ = githubgit.New(token).CurrentUserLogin(r.Context())
-	}
-	appRepos := pickAppRepos(ownerName, reposIn)
 	byHint := map[string][]githubgit.File{}
 	codeFileCount := 0
 	for _, item := range filesRaw {
@@ -398,10 +514,7 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 		if path == "" || strings.HasPrefix(path, ".cursor/") || strings.HasPrefix(path, "automation_sdlc/") {
 			continue
 		}
-		hint = strings.ToLower(strings.TrimSpace(hint))
-		if hint == "" || hint == "app" || hint == "monorepo" {
-			hint = "backend"
-		}
+		hint = classifyRepoHint(path, hint)
 		byHint[hint] = append(byHint[hint], githubgit.File{Path: path, Content: content})
 		lower := strings.ToLower(path)
 		if !(strings.HasPrefix(lower, "docs/") || strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".mdx")) {
@@ -416,7 +529,7 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 	if codeFileCount == 0 && len(byHint) > 0 {
 		evidence["draftPrSkipped"] = "docs_only_stub"
 		evidence["hint"] = "Agent returned markdown/docs only (no LLM source patches). Point BLINK_AGENT_RUNTIME_URL at a runtime with LLM_API_KEY, then re-run implement-step."
-	} else if ok && len(appRepos) > 0 && len(byHint) > 0 {
+	} else if credsOK && len(appRepos) > 0 && len(byHint) > 0 {
 		gh := githubgit.New(token)
 		for i, target := range appRepos {
 			files := filesForRepo(appRepos, byHint, i, target.Kind)
@@ -425,7 +538,8 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 			}
 			title := fmt.Sprintf("Blink implement-step: %s", issueID)
 			bodyText := fmt.Sprintf("Draft PR from Blink implement-step for `%s`.\n\nDo not merge automatically.", issueID)
-			pr, err := gh.CommitBranchAndDraftPR(r.Context(), target.Owner, target.Repo, branch, "", title, bodyText, commitMsg, files)
+			base := implementBaseBranch(r.Context(), gh, target.Owner, target.Repo)
+			pr, err := gh.CommitBranchAndDraftPR(r.Context(), target.Owner, target.Repo, branch, base, title, bodyText, commitMsg, files)
 			if err != nil {
 				evidence["draftPrError"] = err.Error()
 				break
@@ -434,9 +548,21 @@ func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
 				"url": pr.URL, "number": pr.Number, "branch": pr.Branch,
 				"owner": pr.Owner, "repo": pr.Repo, "sha": pr.SHA, "kind": target.Kind,
 			})
+			allPR, allErr := gh.StackOnBranch(r.Context(), target.Owner, target.Repo, "blink/implement-all", "",
+				"Blink implement-all",
+				"Draft that stacks every implemented story onto one branch. Each story keeps its own draft. Do not merge automatically.",
+				commitMsg, files)
+			if allErr != nil {
+				evidence["implementAllBranchError"] = allErr.Error()
+				continue
+			}
+			prs = append(prs, map[string]any{
+				"url": allPR.URL, "number": allPR.Number, "branch": allPR.Branch,
+				"owner": allPR.Owner, "repo": allPR.Repo, "sha": allPR.SHA, "kind": "all",
+			})
 		}
 	} else {
-		if !ok {
+		if !credsOK {
 			evidence["draftPrSkipped"] = "github_token_missing"
 		} else if len(appRepos) == 0 {
 			evidence["draftPrSkipped"] = "app_repos_missing"

@@ -453,6 +453,111 @@ func (c *Client) CommitBranchAndDraftPR(ctx context.Context, owner, repo, branch
 	}, nil
 }
 
+// StackOnBranch commits files onto one long-lived branch without resetting it.
+// Story branches stay separate. A draft pull request is opened once for the stacked branch.
+func (c *Client) StackOnBranch(ctx context.Context, owner, repo, branch, baseBranch, title, body, message string, files []File) (*DraftPRResult, error) {
+	if strings.TrimSpace(branch) == "" {
+		return nil, fmt.Errorf("branch is required")
+	}
+	if baseBranch == "" {
+		b, err := c.DefaultBranch(ctx, owner, repo)
+		if err != nil {
+			return nil, err
+		}
+		baseBranch = b
+	}
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, repo, branch), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		baseStatus, baseRaw, baseErr := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", owner, repo, baseBranch), nil)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		if baseStatus >= 400 {
+			return nil, fmt.Errorf("base branch lookup HTTP %d: %s", baseStatus, truncate(string(baseRaw), 200))
+		}
+		var baseRef map[string]any
+		_ = json.Unmarshal(baseRaw, &baseRef)
+		baseSHA := ""
+		if obj, ok := baseRef["object"].(map[string]any); ok {
+			baseSHA, _ = obj["sha"].(string)
+		}
+		if baseSHA == "" {
+			return nil, fmt.Errorf("base branch has empty sha")
+		}
+		status, raw, err = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), map[string]any{
+			"ref": "refs/heads/" + branch,
+			"sha": baseSHA,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if status >= 400 {
+			return nil, fmt.Errorf("create branch HTTP %d: %s", status, truncate(string(raw), 200))
+		}
+	} else if status >= 400 {
+		return nil, fmt.Errorf("branch lookup HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+
+	commit, err := c.CommitFiles(ctx, owner, repo, branch, message, files)
+	if err != nil {
+		return nil, err
+	}
+
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("head", owner+":"+branch)
+	status, raw, err = c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls?%s", owner, repo, q.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("list pull requests HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var pulls []map[string]any
+	if err := json.Unmarshal(raw, &pulls); err != nil {
+		return nil, fmt.Errorf("list pull requests: %w", err)
+	}
+	if len(pulls) > 0 {
+		prURL, _ := pulls[0]["html_url"].(string)
+		num := 0
+		switch n := pulls[0]["number"].(type) {
+		case float64:
+			num = int(n)
+		}
+		return &DraftPRResult{
+			URL: prURL, Number: num, Branch: branch, Owner: owner, Repo: repo, SHA: commit.SHA,
+		}, nil
+	}
+
+	status, raw, err = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), map[string]any{
+		"title": title,
+		"head":  branch,
+		"base":  baseBranch,
+		"body":  body,
+		"draft": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("create draft PR HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var pr map[string]any
+	_ = json.Unmarshal(raw, &pr)
+	prURL, _ := pr["html_url"].(string)
+	num := 0
+	switch n := pr["number"].(type) {
+	case float64:
+		num = int(n)
+	}
+	return &DraftPRResult{
+		URL: prURL, Number: num, Branch: branch, Owner: owner, Repo: repo, SHA: commit.SHA,
+	}, nil
+}
+
 func (c *Client) closeOpenPullsForHead(ctx context.Context, owner, repo, branch string) error {
 	q := url.Values{}
 	q.Set("state", "open")
@@ -502,6 +607,180 @@ func (c *Client) CombinedStatus(ctx context.Context, owner, repo, ref string) (s
 	_ = json.Unmarshal(raw, &m)
 	state, _ := m["state"].(string)
 	return state, string(raw), nil
+}
+
+// PullHead returns the head commit of a pull request.
+func (c *Client) PullHead(ctx context.Context, owner, repo string, number int) (sha, ref string, err error) {
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number), nil)
+	if err != nil {
+		return "", "", err
+	}
+	if status == http.StatusNotFound {
+		return "", "", fmt.Errorf("pull request not found")
+	}
+	if status >= 400 {
+		return "", "", fmt.Errorf("pull request HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return "", "", err
+	}
+	if body.Head.SHA == "" {
+		return "", "", fmt.Errorf("pull request has no head commit")
+	}
+	return body.Head.SHA, body.Head.Ref, nil
+}
+
+// PullChangedPaths lists files touched by a pull request.
+func (c *Client) PullChangedPaths(ctx context.Context, owner, repo string, number int) ([]string, error) {
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", url.PathEscape(owner), url.PathEscape(repo), number), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("pull request files HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var rows []struct {
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.Filename) != "" {
+			out = append(out, row.Filename)
+		}
+	}
+	return out, nil
+}
+
+// FileBytes reads one file at a commit. Missing files return an error containing "not found".
+func (c *Client) FileBytes(ctx context.Context, owner, repo, ref, filePath string) ([]byte, error) {
+	filePath = strings.TrimPrefix(strings.TrimSpace(filePath), "/")
+	if filePath == "" || strings.Contains(filePath, "..") {
+		return nil, fmt.Errorf("invalid path")
+	}
+	parts := strings.Split(filePath, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", url.PathEscape(owner), url.PathEscape(repo), strings.Join(parts, "/"), url.QueryEscape(ref))
+	status, raw, err := c.do(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, fmt.Errorf("not found")
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("file HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Encoding    string `json:"encoding"`
+		Content     string `json:"content"`
+		DownloadURL string `json:"download_url"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(body.Encoding, "base64") && strings.TrimSpace(body.Content) != "" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, body.Content))
+		if err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	}
+	if body.DownloadURL != "" {
+		return c.getAbsolute(ctx, body.DownloadURL)
+	}
+	return nil, fmt.Errorf("file has no content")
+}
+
+func (c *Client) getAbsolute(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("download HTTP %d", res.StatusCode)
+	}
+	return raw, nil
+}
+
+// BranchSHA returns the commit at refs/heads/<branch>.
+func (c *Client) BranchSHA(ctx context.Context, owner, repo, branch string) (string, error) {
+	branch = strings.TrimPrefix(strings.TrimSpace(branch), "/")
+	if branch == "" || strings.Contains(branch, "..") {
+		return "", fmt.Errorf("invalid branch")
+	}
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", url.PathEscape(owner), url.PathEscape(repo), branch), nil)
+	if err != nil {
+		return "", err
+	}
+	if status == http.StatusNotFound {
+		return "", fmt.Errorf("branch not found")
+	}
+	if status >= 400 {
+		return "", fmt.Errorf("branch HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return "", err
+	}
+	if body.Object.SHA == "" {
+		return "", fmt.Errorf("branch has no commit")
+	}
+	return body.Object.SHA, nil
+}
+
+// TreePaths lists file paths in a git tree.
+func (c *Client) TreePaths(ctx context.Context, owner, repo, sha string) ([]string, error) {
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/git/trees/%s?recursive=1", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha)), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("tree HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(body.Tree))
+	for _, item := range body.Tree {
+		if item.Type == "blob" && strings.TrimSpace(item.Path) != "" {
+			out = append(out, item.Path)
+		}
+	}
+	return out, nil
 }
 
 func truncate(s string, n int) string {

@@ -19,6 +19,18 @@ func TestPickAppReposUsesOwnerAndSkipsWorkspace(t *testing.T) {
 	}
 }
 
+func TestClassifyRepoHintKeepsScreenInFrontend(t *testing.T) {
+	if got := classifyRepoHint("src/App.tsx", "backend"); got != "frontend" {
+		t.Fatalf("screen hint = %s", got)
+	}
+	if got := classifyRepoHint("src/calculator/calculator.controller.ts", ""); got != "backend" {
+		t.Fatalf("server hint = %s", got)
+	}
+	if got := classifyRepoHint("src/App.tsx", "app"); got != "frontend" {
+		t.Fatalf("app hint = %s", got)
+	}
+}
+
 func TestFilesForRepoPutsEveryPatchOnTheOnlyAppRepo(t *testing.T) {
 	repos := []struct{ Owner, Repo, Kind string }{{Owner: "octocat", Repo: "calculator-app-test", Kind: "backend"}}
 	byHint := map[string][]githubgit.File{
