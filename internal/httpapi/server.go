@@ -37,7 +37,8 @@ type Server struct {
 	mail      *mailer.Service
 	integ     *integrations.Service
 	s3        *s3ws.Service
-	chat      *chat.Store
+	chat          *chat.Store
+	storyRunStore *storyRunMemory
 }
 
 func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store) http.Handler {
@@ -144,6 +145,9 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				prr.Post("/{id}/grooming-sign-off-capture", s.groomingSignOffCapture)
 				prr.Post("/{id}/git-apply", s.gitApply)
 				prr.Post("/{id}/implement-step", s.implementStepApply)
+				prr.Post("/{id}/story-runs", s.createStoryRun)
+				prr.Get("/{id}/story-runs/latest", s.latestStoryRun)
+				prr.Post("/{id}/pull-request-app", s.previewPullRequestApp)
 				prr.Post("/{id}/qa-validation", s.qaValidation)
 				prr.Post("/{id}/sdlc-start", s.sdlcStart)
 				prr.Post("/{id}/sdlc-next", s.sdlcNext)
