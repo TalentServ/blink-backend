@@ -14,6 +14,7 @@ import (
 	"github.com/nisha-ts-40599/blink-backend/internal/auth"
 	"github.com/nisha-ts-40599/blink-backend/internal/chat"
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
+	"github.com/nisha-ts-40599/blink-backend/internal/codex"
 	"github.com/nisha-ts-40599/blink-backend/internal/config"
 	"github.com/nisha-ts-40599/blink-backend/internal/crypto"
 	"github.com/nisha-ts-40599/blink-backend/internal/db"
@@ -86,7 +87,16 @@ func main() {
 		s3svc = s3ws.New(cfg)
 	}
 	chatStore := chat.New(pool)
-	handler := httpapi.New(cfg, authSvc, proj, canonicalSvc, agentClient, mail, integ, s3svc, chatStore)
+	codexStore := codex.NewStore(pool)
+	codexRunner := codex.NewRunner(codexStore, codex.RunnerConfig{
+		APIKey:         cfg.OpenAIAPIKey,
+		Model:          cfg.CodexModel,
+		ContainerSize:  cfg.CodexContainerSize,
+		NetworkAccess:  cfg.CodexNetworkAccess,
+		AllowedDomains: cfg.CodexAllowedDomains,
+		TurnTimeout:    cfg.CodexTurnTimeout,
+	})
+	handler := httpapi.New(cfg, authSvc, proj, canonicalSvc, agentClient, mail, integ, s3svc, chatStore, codexStore, codexRunner)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

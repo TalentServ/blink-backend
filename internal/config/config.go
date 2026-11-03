@@ -23,9 +23,19 @@ type Config struct {
 	AWSRegion          string
 	S3BucketName       string
 	S3PublicBaseURL    string
-	AutomationSDLCPath string
-	CanonicalPython    string
-	CanonicalTimeout   time.Duration
+	AutomationSDLCPath   string
+	AISDLCPath           string
+	AISDLCRepoTarballURL string
+	AISDLCSDKCommit      string
+	CanonicalPython      string
+	CanonicalTimeout     time.Duration
+
+	OpenAIAPIKey        string
+	CodexModel          string
+	CodexContainerSize  string
+	CodexNetworkAccess  string
+	CodexAllowedDomains []string
+	CodexTurnTimeout    time.Duration
 
 	JiraClientID     string
 	JiraClientSecret string
@@ -93,9 +103,19 @@ func Load() (Config, error) {
 		AWSRegion:          env("AWS_REGION", "us-west-2"),
 		S3BucketName:       os.Getenv("S3_BUCKET_NAME"),
 		S3PublicBaseURL:    os.Getenv("S3_PUBLIC_BASE_URL"),
-		AutomationSDLCPath: env("BLINK_AUTOMATION_SDLC_PATH", "../automation_sdlc"),
-		CanonicalPython:    env("BLINK_CANONICAL_SETUP_PYTHON", "python3"),
-		CanonicalTimeout:   durationEnv("BLINK_CANONICAL_SETUP_TIMEOUT", 90*time.Second),
+		AutomationSDLCPath:   env("BLINK_AUTOMATION_SDLC_PATH", "../automation_sdlc"),
+		AISDLCPath:           env("BLINK_AI_SDLC_PATH", "../ai-sdlc"),
+		AISDLCRepoTarballURL: env("BLINK_AI_SDLC_TARBALL_URL", "https://codeload.github.com/ai-sdlc-framework/ai-sdlc/tar.gz/refs/heads/main"),
+		AISDLCSDKCommit:      env("BLINK_AI_SDLC_SDK_COMMIT", "ceb2eb2eec5b863356f9934e282317fb377d345c"),
+		CanonicalPython:      env("BLINK_CANONICAL_SETUP_PYTHON", "python3"),
+		CanonicalTimeout:     durationEnv("BLINK_CANONICAL_SETUP_TIMEOUT", 90*time.Second),
+
+		OpenAIAPIKey:        firstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY")),
+		CodexModel:          env("BLINK_CODEX_MODEL", "gpt-6-luna"),
+		CodexContainerSize:  env("BLINK_CODEX_CONTAINER_SIZE", "small"),
+		CodexNetworkAccess:  env("BLINK_CODEX_NETWORK_ACCESS", "disabled"),
+		CodexAllowedDomains: splitCSV(os.Getenv("BLINK_CODEX_ALLOWED_DOMAINS")),
+		CodexTurnTimeout:    durationEnv("BLINK_CODEX_TURN_TIMEOUT", 10*time.Minute),
 
 		JiraClientID:     os.Getenv("BLINK_JIRA_CLIENT_ID"),
 		JiraClientSecret: os.Getenv("BLINK_JIRA_CLIENT_SECRET"),

@@ -409,6 +409,11 @@ func min(a, b int) int {
 }
 
 func (s *Server) implementStepApply(w http.ResponseWriter, r *http.Request) {
+	// Prefer Codex Cloud Agents when OPENAI_API_KEY is configured.
+	if s.codex != nil && s.codex.Configured() {
+		s.implementStepCodex(w, r)
+		return
+	}
 	id, err := pathID(r)
 	if err != nil {
 		writeErr(w, err)
