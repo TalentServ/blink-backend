@@ -1050,3 +1050,86 @@ func keepTarballPath(p string) bool {
 	}
 	return strings.TrimSpace(p) != ""
 }
+
+// CompareFile is one path from a GitHub compare response.
+type CompareFile struct {
+	Path      string
+	Status    string
+	Patch     string
+	Additions int
+	Deletions int
+}
+
+// Compare returns the file patches between two refs.
+func (c *Client) Compare(ctx context.Context, owner, repo, base, head string) ([]CompareFile, error) {
+	apiPath := fmt.Sprintf("/repos/%s/%s/compare/%s...%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(base), url.PathEscape(head))
+	status, raw, err := c.do(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("compare HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Files []struct {
+			Filename  string `json:"filename"`
+			Status    string `json:"status"`
+			Patch     string `json:"patch"`
+			Additions int    `json:"additions"`
+			Deletions int    `json:"deletions"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	out := make([]CompareFile, 0, len(body.Files))
+	for _, f := range body.Files {
+		out = append(out, CompareFile{
+			Path: f.Filename, Status: f.Status, Patch: f.Patch, Additions: f.Additions, Deletions: f.Deletions,
+		})
+	}
+	return out, nil
+}
+
+// CommitInfo is a short commit row for the inspector.
+type CommitInfo struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	When    string `json:"when"`
+}
+
+// ListCommits lists recent commits on a ref.
+func (c *Client) ListCommits(ctx context.Context, owner, repo, ref string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 || limit > 30 {
+		limit = 20
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/commits?sha=%s&per_page=%d", url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(ref), limit)
+	status, raw, err := c.do(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("commits HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var rows []struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+			Author  struct {
+				Date string `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]CommitInfo, 0, len(rows))
+	for _, row := range rows {
+		msg := row.Commit.Message
+		if i := strings.IndexByte(msg, '\n'); i >= 0 {
+			msg = msg[:i]
+		}
+		out = append(out, CommitInfo{SHA: row.SHA, Message: msg, When: row.Commit.Author.Date})
+	}
+	return out, nil
+}

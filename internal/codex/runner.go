@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,23 +23,24 @@ type EventEmitter func(event string, payload map[string]any) bool
 
 // RunRequest drives one Codex sandbox turn.
 type RunRequest struct {
-	ProjectID       int64
-	IssueID         string
-	WorkflowKind    WorkflowKind
-	PromptStem      string
-	PromptVars      PromptVars
-	UserInput       string
-	IdempotencyKey  string
-	KitRoot         string
-	Workspace       *WorkspacePlan
-	PriorHistory    []map[string]any
-	PriorFiles      map[string]string
-	Model           string
-	ContainerSize   string
-	NetworkAccess   string
-	AllowedDomains  []string
-	TurnTimeout     time.Duration
-	CodexSessionID  uuid.UUID // optional existing Neon session
+	ProjectID      int64
+	IssueID        string
+	WorkflowKind   WorkflowKind
+	PromptStem     string
+	PromptVars     PromptVars
+	UserInput      string
+	IdempotencyKey string
+	KitRoot        string
+	Workspace      *WorkspacePlan
+	PriorHistory   []map[string]any
+	PriorFiles     map[string]string
+	Model          string
+	ContainerSize  string
+	NetworkAccess  string
+	AllowedDomains []string
+	TurnTimeout    time.Duration
+	CodexSessionID uuid.UUID // optional existing Neon session
+	ImageDataURLs  []string
 }
 
 // RunResult is the durable outcome of a turn after OpenAI session deletion.
@@ -109,6 +111,33 @@ func (r *Runner) Configured() bool {
 }
 
 // CancelActive cancels an in-flight OpenAI turn and clears Neon running state.
+func (r *Runner) LiveBlinkSessions() map[uuid.UUID]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[uuid.UUID]struct{}{}
+	for _, id := range r.activeSessions {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func (r *Runner) CancelAll(ctx context.Context, projectID int64) error {
+	rows, err := r.store.RunningSessions(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("no running Codex session")
+	}
+	var first error
+	for _, row := range rows {
+		if err := r.CancelActive(ctx, projectID, row.IssueID); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
 func (r *Runner) CancelActive(ctx context.Context, projectID int64, issueID string) error {
 	sessUUID, openaiID, err := r.store.LatestRunningOpenAISession(ctx, projectID, issueID)
 	if err != nil {
@@ -163,6 +192,18 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, emit EventEmitter) (*R
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		bg, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cleared, abandonErr := r.store.AbandonIfRunning(bg, sess.ID, "abandoned", "turn ended without a terminal status")
+		if abandonErr != nil {
+			log.Printf("codex abandon session=%s project=%d issue=%s err=%v", sess.ID, sess.ProjectID, sess.IssueID, abandonErr)
+			return
+		}
+		if cleared {
+			log.Printf("codex abandon session=%s project=%d issue=%s reason=turn ended without a terminal status", sess.ID, sess.ProjectID, sess.IssueID)
+		}
+	}()
 
 	instructions, err := BuildInstructions(req.KitRoot, req.PromptStem, req.PromptVars)
 	if err != nil {
@@ -187,9 +228,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, emit EventEmitter) (*R
 	}
 
 	input := buildUserInput(req)
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	params := openai.BetaAgentSessionNewParams{
 		Agent: openai.BetaAgentSessionNewParamsAgent{
 			Model:        openai.String(model),
@@ -199,9 +237,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, emit EventEmitter) (*R
 			},
 		},
 		Environment: env,
-		Input: openai.BetaAgentSessionNewParamsInputUnion{
-			OfString: openai.String(input),
-		},
+		Input:       sessionInput(input, req.ImageDataURLs),
 	}
 
 	var opts []option.RequestOption
@@ -209,6 +245,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, emit EventEmitter) (*R
 		opts = append(opts, option.WithHeader("Idempotency-Key", key))
 	}
 
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	result, err := r.runStreamingWithRetry(runCtx, params, opts, sess, turn, emit)
 	return result, err
 }
@@ -349,6 +387,7 @@ func (r *Runner) runOnce(
 	}
 	defer cleanup()
 
+	var commandBuf strings.Builder
 	for stream.Next() {
 		ev := stream.Current()
 		switch ev.Type {
@@ -368,6 +407,7 @@ func (r *Runner) runOnce(
 			})
 		case "agent.session.environment.ready":
 			_ = emit("status", map[string]any{"phase": "connected"})
+			_ = emit("activity", map[string]any{"kind": "status", "text": "Sandbox ready", "status": "completed"})
 		case "agent.session.environment.failed":
 			status = StatusFailed
 			errCode = "environment_failed"
@@ -379,6 +419,20 @@ func (r *Runner) runOnce(
 		case "agent.output.command_execution_output.delta":
 			commands = append(commands, map[string]any{"delta": ev.Delta})
 			_ = emit("command", map[string]any{"delta": ev.Delta})
+			commandBuf.WriteString(ev.Delta)
+			for {
+				text := commandBuf.String()
+				idx := strings.IndexByte(text, '\n')
+				if idx < 0 {
+					break
+				}
+				line := strings.TrimSpace(text[:idx])
+				commandBuf.Reset()
+				commandBuf.WriteString(text[idx+1:])
+				if line != "" {
+					_ = emit("activity", map[string]any{"kind": "command", "text": line, "status": "running"})
+				}
+			}
 		case "agent.session.turn.completed":
 			if ev.Turn.ID != "" {
 				openaiTurnID = ev.Turn.ID
@@ -388,6 +442,7 @@ func (r *Runner) runOnce(
 				continue
 			}
 			_ = emit("status", map[string]any{"phase": "turn_completed", "turnId": openaiTurnID})
+			_ = emit("activity", map[string]any{"kind": "status", "text": "Turn finished in the sandbox", "status": "completed"})
 		case "agent.session.turn.failed", "agent.session.failed", "error":
 			status = StatusFailed
 			errCode = ev.Type
@@ -398,6 +453,7 @@ func (r *Runner) runOnce(
 			errCode = "cancelled"
 			errMsg = "turn cancelled"
 			_ = emit("status", map[string]any{"phase": "cancelled"})
+			_ = emit("activity", map[string]any{"kind": "status", "text": "Turn cancelled", "status": "cancelled"})
 		case "agent.session.requires_action":
 			_ = emit("status", map[string]any{"phase": "requires_action"})
 		default:
@@ -455,17 +511,23 @@ func (r *Runner) runOnce(
 		raw := downloaded["/workspace/outputs/blink-result.json"]
 		resultJSON = parseResultEnvelope(raw, output.String())
 		files = mergeEnvelopeFiles(files, resultJSON)
+		for p := range files {
+			if strings.Contains(p, "blink-result.json") || IsGovernancePath(p) {
+				continue
+			}
+			_ = emit("activity", map[string]any{"kind": "file", "text": p, "status": string(status)})
+		}
 	}
 
 	history := append([]map[string]any{}, sess.History...)
 	history = append(history, map[string]any{
-		"turn":       turn.TurnNumber,
-		"prompt":     turn.UserPrompt,
-		"output":     truncate(output.String(), 8000),
-		"status":     string(status),
-		"summary":    stringField(resultJSON, "summary"),
+		"turn":           turn.TurnNumber,
+		"prompt":         turn.UserPrompt,
+		"output":         truncate(output.String(), 8000),
+		"status":         string(status),
+		"summary":        stringField(resultJSON, "summary"),
 		"recommendation": stringField(resultJSON, "recommendation"),
-		"filesChanged": len(files),
+		"filesChanged":   len(files),
 	})
 	mergedFiles := map[string]string{}
 	for k, v := range sess.LatestFiles {
@@ -502,6 +564,7 @@ func (r *Runner) runOnce(
 		return out, false, fmt.Errorf("codex turn cancelled")
 	}
 	_ = emit("status", map[string]any{"phase": "completed", "turnId": openaiTurnID})
+	_ = emit("activity", map[string]any{"kind": "status", "text": "Artifacts harvested", "status": "completed"})
 	return out, false, nil
 }
 
@@ -567,6 +630,46 @@ func (r *Runner) deleteSessionWithRetry(ctx context.Context, sessionID string) e
 		return err
 	}
 	return last
+}
+
+func sessionInput(text string, images []string) openai.BetaAgentSessionNewParamsInputUnion {
+	if len(images) == 0 {
+		return openai.BetaAgentSessionNewParamsInputUnion{OfString: openai.String(text)}
+	}
+	parts := []openai.InputContentParamUnion{openai.InputContentParamOfParamInputText(text)}
+	for _, image := range images {
+		if strings.TrimSpace(image) == "" {
+			continue
+		}
+		parts = append(parts, openai.InputContentParamOfParamInputImage(image))
+	}
+	return openai.BetaAgentSessionNewParamsInputUnion{
+		OfArrayOfInputMessages: []openai.AgentSessionInputMessageParam{{
+			Content: parts,
+			Type:    openai.AgentSessionInputMessageParamTypeMessage,
+		}},
+	}
+}
+
+// Steer injects a user message into the live OpenAI session.
+func (r *Runner) Steer(ctx context.Context, projectID int64, issueID, text string, images []string) error {
+	_, openaiID, err := r.store.LatestRunningOpenAISession(ctx, projectID, issueID)
+	if err != nil || openaiID == "" {
+		return fmt.Errorf("no running Codex session")
+	}
+	parts := []openai.InputContentParamUnion{openai.InputContentParamOfParamInputText(text)}
+	for _, image := range images {
+		if strings.TrimSpace(image) != "" {
+			parts = append(parts, openai.InputContentParamOfParamInputImage(image))
+		}
+	}
+	msg := openai.AgentSessionInputParamOfParamAgentSessionInputMessage([]openai.AgentSessionInputMessageParam{{
+		Content: parts,
+		Type:    openai.AgentSessionInputMessageParamTypeMessage,
+	}})
+	return r.client.Beta.Agents.Sessions.Events.New(ctx, openaiID, openai.BetaAgentSessionEventNewParams{
+		Events: []openai.AgentSessionInputParamUnion{msg},
+	})
 }
 
 func buildUserInput(req RunRequest) string {

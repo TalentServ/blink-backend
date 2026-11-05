@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
@@ -22,14 +24,33 @@ func (s *Server) requireNoRunningCodex(w http.ResponseWriter, ctx context.Contex
 	if s.codexStore == nil {
 		return true
 	}
-	running, err := s.codexStore.ProjectHasRunning(ctx, projectID)
-	if err != nil || !running {
+	live := map[uuid.UUID]struct{}{}
+	if s.codex != nil {
+		live = s.codex.LiveBlinkSessions()
+	}
+	if cleared, err := s.codexStore.ReapAbandoned(ctx, projectID, live, 20*time.Second); err != nil {
+		log.Printf("codex reap project=%d err=%v", projectID, err)
+	} else {
+		for _, row := range cleared {
+			log.Printf("codex reap stale project=%d issue=%s session=%s updated=%s", row.ProjectID, row.IssueID, row.ID, row.UpdatedAt.Format(time.RFC3339))
+		}
+	}
+	running, err := s.codexStore.RunningSessions(ctx, projectID)
+	if err != nil || len(running) == 0 {
 		return true
 	}
+	issues := make([]string, 0, len(running))
+	for _, row := range running {
+		if row.IssueID != "" {
+			issues = append(issues, row.IssueID)
+		}
+		log.Printf("codex busy project=%d issue=%s session=%s updated=%s", projectID, row.IssueID, row.ID, row.UpdatedAt.Format(time.RFC3339))
+	}
 	writeJSON(w, http.StatusConflict, map[string]any{
-		"status":  "error",
-		"message": "A Codex turn is already running for this project. Cancel it or wait.",
-		"errors":  []string{"codex_busy"},
+		"status":   "error",
+		"message":  "A Codex turn is already running for this project. Cancel it or wait.",
+		"errors":   []string{"codex_busy"},
+		"issueIds": issues,
 	})
 	return false
 }
@@ -37,9 +58,9 @@ func (s *Server) requireNoRunningCodex(w http.ResponseWriter, ctx context.Contex
 type codexApplyMode string
 
 const (
-	applyDraftPR  codexApplyMode = "draft-pr"
-	applyInPlace  codexApplyMode = "in-place"
-	applyNone     codexApplyMode = "none"
+	applyDraftPR codexApplyMode = "draft-pr"
+	applyInPlace codexApplyMode = "in-place"
+	applyNone    codexApplyMode = "none"
 )
 
 func (s *Server) requireCodex(w http.ResponseWriter) bool {
@@ -71,6 +92,7 @@ type codexBody struct {
 	Findings          []map[string]any  `json:"findings"`
 	Repositories      []repoRef         `json:"repositories"`
 	OverlayFiles      []overlayPayload  `json:"overlayFiles"`
+	Attachments       []codexAttachment `json:"attachments"`
 	ProjectContext    string            `json:"projectContext"`
 	TechStack         []string          `json:"techStack"`
 	Acceptance        string            `json:"acceptanceCriteria"`
@@ -80,7 +102,16 @@ type codexBody struct {
 	RepositoryContext string            `json:"repositoryContext"`
 	ValidationResults string            `json:"validationResults"`
 	ApprovalRules     string            `json:"approvalRules"`
+	Model             string            `json:"model"`
 	Raw               map[string]any    `json:"-"`
+}
+
+type codexAttachment struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+	DataURL string `json:"dataUrl"`
 }
 
 func readCodexBody(r *http.Request) (codexBody, map[string]any) {
@@ -164,7 +195,10 @@ func (s *Server) runCodexImplement(w http.ResponseWriter, r *http.Request, strea
 		return writeSSE(event, payload)
 	}
 
-	result, prs, evidence, runErr := s.executeCodexImplement(r.Context(), id, p.ProjectName, p.WizardState, sessionEmail(r), issueID, body, raw, applyDraftPR, emit)
+	// Keep the agent running if the browser leaves the Implementation tab.
+	// The HTTP request context cancels on disconnect; this run should finish
+	// unless the user explicitly stops it.
+	result, prs, evidence, runErr := s.executeCodexImplement(context.WithoutCancel(r.Context()), id, p.ProjectName, p.WizardState, sessionEmail(r), issueID, body, raw, applyDraftPR, emit)
 	done := map[string]any{
 		"status":            "ok",
 		"message":           "Codex implement-step completed.",
@@ -285,6 +319,7 @@ func (s *Server) executeCodexImplement(
 			overlays[o.Path] = o.Content
 		}
 	}
+	images, attachmentNote, storedAttachments := stageCodexAttachments(body.Attachments, overlays)
 
 	var prior *codex.Session
 	if id := strings.TrimSpace(body.CodexSessionID); id != "" {
@@ -310,6 +345,9 @@ func (s *Server) executeCodexImplement(
 	if userInput == "" {
 		userInput = fmt.Sprintf("Implement the approved plan step for issue %s. Apply code changes under /workspace/repos and write blink-result.json.", issueID)
 	}
+	if attachmentNote != "" {
+		userInput = userInput + "\n\n" + attachmentNote
+	}
 	kind := codex.WorkflowImplementStep
 	stem := codex.PromptImplementStep
 	if mode == applyInPlace && strings.TrimSpace(body.FollowUp) != "" {
@@ -324,11 +362,13 @@ func (s *Server) executeCodexImplement(
 		PromptVars:     hydrated.Vars,
 		UserInput:      userInput,
 		IdempotencyKey: body.IdempotencyKey,
+		ImageDataURLs:  images,
 		KitRoot:        kit,
 		Workspace:      ws,
 		PriorHistory:   priorHistory,
 		PriorFiles:     priorFiles,
 		CodexSessionID: sessionID,
+		Model:          strings.TrimSpace(body.Model),
 	}, emit)
 	if err != nil && result == nil {
 		return nil, nil, nil, err
@@ -346,6 +386,7 @@ func (s *Server) executeCodexImplement(
 	}
 	product, _ := codex.PartitionProductFiles(result.Files)
 	result.Files = product
+	s.persistWorkbench(ctx, result, ws.Baseline, product, storedAttachments)
 	gate := codex.EvaluateHarvestedTurn(bundle, kind, s.cfg.CodexModel, userInput+hydrated.Vars["PROJECT_CONTEXT"], result.OutputText, product, envelope, false)
 	if gate != nil {
 		evidence["qualityGates"] = gateResultsAsMaps(gate)
@@ -518,7 +559,7 @@ func (s *Server) codexFollowUpStream(w http.ResponseWriter, r *http.Request) {
 	body.Instruction = follow
 	body.Confirm = true
 	body.GitWritten = true
-	result, prs, evidence, runErr := s.executeCodexImplement(r.Context(), id, p.ProjectName, p.WizardState, sessionEmail(r), issueID, body, body.Raw, applyInPlace, func(event string, payload map[string]any) bool {
+	result, prs, evidence, runErr := s.executeCodexImplement(context.WithoutCancel(r.Context()), id, p.ProjectName, p.WizardState, sessionEmail(r), issueID, body, body.Raw, applyInPlace, func(event string, payload map[string]any) bool {
 		return writeSSE(event, payload)
 	})
 	done := map[string]any{
@@ -555,10 +596,17 @@ func (s *Server) codexCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	body, _ := readCodexBody(r)
 	issueID := strings.TrimSpace(body.IssueID)
-	if err := s.codex.CancelActive(r.Context(), id, issueID); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "error", "message": err.Error()})
+	var cancelErr error
+	if issueID != "" {
+		cancelErr = s.codex.CancelActive(r.Context(), id, issueID)
+	}
+	allErr := s.codex.CancelAll(r.Context(), id)
+	if cancelErr != nil && allErr != nil {
+		log.Printf("codex cancel project=%d issue=%s err=%v", id, issueID, allErr)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "error", "message": allErr.Error()})
 		return
 	}
+	log.Printf("codex cancel project=%d issue=%s status=ok", id, issueID)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "message": "Codex session cancelled."})
 }
 
@@ -658,7 +706,7 @@ func (s *Server) runCodexPRReview(w http.ResponseWriter, r *http.Request, stream
 		body.PRNumber, body.Owner, body.Repo, diff.HeadSHA, ciState, body.Instruction,
 	)
 
-	result, runErr := s.codex.Run(r.Context(), codex.RunRequest{
+	result, runErr := s.codex.Run(context.WithoutCancel(r.Context()), codex.RunRequest{
 		ProjectID:      id,
 		IssueID:        issueID,
 		WorkflowKind:   codex.WorkflowPRReview,
@@ -710,24 +758,24 @@ func (s *Server) runCodexPRReview(w http.ResponseWriter, r *http.Request, stream
 		s.recordShipDelivery(r.Context(), id, sessionEmail(r), "review-pr", "ai-pr-review", "",
 			map[string]any{"issueId": issueID, "prNumber": body.PRNumber, "owner": body.Owner, "repo": body.Repo},
 			map[string]any{
-				"recommendation": recommendation,
-				"findings":       findings,
-				"evidence":       evidence,
-				"codex":          true,
-				"is_human_approval": false,
+				"recommendation":            recommendation,
+				"findings":                  findings,
+				"evidence":                  evidence,
+				"codex":                     true,
+				"is_human_approval":         false,
 				"satisfies_human_pr_review": false,
 			},
 		)
 	}
 	done := map[string]any{
-		"status": "ok",
-		"message": "Codex PR review completed.",
-		"recommendation": recommendation,
-		"reviewFindings": findings,
+		"status":           "ok",
+		"message":          "Codex PR review completed.",
+		"recommendation":   recommendation,
+		"reviewFindings":   findings,
 		"githubCommentUrl": commentURL,
-		"evidence": evidence,
-		"issueId": issueID,
-		"pr": map[string]any{"number": diff.Number, "url": diff.HTMLURL, "headSha": diff.HeadSHA, "branch": diff.HeadBranch},
+		"evidence":         evidence,
+		"issueId":          issueID,
+		"pr":               map[string]any{"number": diff.Number, "url": diff.HTMLURL, "headSha": diff.HeadSHA, "branch": diff.HeadBranch},
 	}
 	if result != nil {
 		done["codexSessionId"] = result.CodexSessionID.String()
@@ -813,15 +861,15 @@ func (s *Server) fixReviewFindingsStream(w http.ResponseWriter, r *http.Request)
 		"DEV-10: Fix ONLY these human-approved finding IDs: %s\nDetails:\n%s\nMark prior review evidence STALE. Push fixes onto branch %s. Do not expand scope.",
 		strings.Join(body.FindingIDs, ", "), string(findingsJSON), branch,
 	)
-	result, runErr := s.codex.Run(r.Context(), codex.RunRequest{
-		ProjectID:      id,
-		IssueID:        issueID,
-		WorkflowKind:   codex.WorkflowFixReviewFindings,
-		PromptStem:     codex.PromptFixReviewFindings,
+	result, runErr := s.codex.Run(context.WithoutCancel(r.Context()), codex.RunRequest{
+		ProjectID:    id,
+		IssueID:      issueID,
+		WorkflowKind: codex.WorkflowFixReviewFindings,
+		PromptStem:   codex.PromptFixReviewFindings,
 		PromptVars: codex.PromptVars{
-			"ISSUE":          issueID,
-			"WORKFLOW_STATE": body.WorkflowState,
-			"PR_CONTEXT":     fmt.Sprintf("%s/%s branch %s PR #%d", body.Owner, body.Repo, branch, body.PRNumber),
+			"ISSUE":                   issueID,
+			"WORKFLOW_STATE":          body.WorkflowState,
+			"PR_CONTEXT":              fmt.Sprintf("%s/%s branch %s PR #%d", body.Owner, body.Repo, branch, body.PRNumber),
 			"IMPLEMENTATION_EVIDENCE": string(findingsJSON),
 		},
 		UserInput:      userInput,

@@ -43,6 +43,7 @@ type WorkspacePlan struct {
 	PackagesNpm    []string
 	PackagesSystem []string
 	RepoRoots      []string
+	Baseline       map[string]string
 }
 
 const blinkExportScript = `#!/usr/bin/env python3
@@ -94,6 +95,7 @@ func StageWorkspace(
 		PackagesPython: inferPythonPackages(techStack),
 		PackagesNpm:    inferNpmPackages(techStack),
 		PackagesSystem: inferSystemPackages(techStack),
+		Baseline:       map[string]string{},
 	}
 
 	files := make([]StagedFile, 0, 64)
@@ -118,10 +120,14 @@ func StageWorkspace(
 			items, xerr := githubgit.ExtractTextFiles(raw, maxRepoFilesFetch, maxRepoFileBytes)
 			if xerr == nil {
 				for _, item := range items {
+					rel := filepathToSlash(item.Path)
 					files = append(files, StagedFile{
-						Path:    path.Join(root, filepathToSlash(item.Path)),
+						Path:    path.Join(root, rel),
 						Content: item.Content,
 					})
+					if rel != "" && !IsGovernancePath(rel) {
+						plan.Baseline[rel] = string(item.Content)
+					}
 				}
 				extracted = true
 			}
@@ -141,7 +147,11 @@ func StageWorkspace(
 					if err != nil || len(raw) == 0 || len(raw) > maxRepoFileBytes || !utf8.Valid(raw) {
 						continue
 					}
-					files = append(files, StagedFile{Path: path.Join(root, filepathToSlash(p)), Content: raw})
+					rel := filepathToSlash(p)
+					files = append(files, StagedFile{Path: path.Join(root, rel), Content: raw})
+					if rel != "" && !IsGovernancePath(rel) {
+						plan.Baseline[rel] = string(raw)
+					}
 				}
 			}
 		}
