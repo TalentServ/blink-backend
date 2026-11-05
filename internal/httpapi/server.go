@@ -20,6 +20,7 @@ import (
 	"github.com/nisha-ts-40599/blink-backend/internal/auth"
 	"github.com/nisha-ts-40599/blink-backend/internal/canonical"
 	"github.com/nisha-ts-40599/blink-backend/internal/chat"
+	"github.com/nisha-ts-40599/blink-backend/internal/codex"
 	"github.com/nisha-ts-40599/blink-backend/internal/config"
 	"github.com/nisha-ts-40599/blink-backend/internal/integrations"
 	"github.com/nisha-ts-40599/blink-backend/internal/mailer"
@@ -38,14 +39,16 @@ type Server struct {
 	integ     *integrations.Service
 	s3        *s3ws.Service
 	chat          *chat.Store
+	codexStore    *codex.Store
+	codex         *codex.Runner
 	storyRunStore *storyRunMemory
 }
 
-func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store) http.Handler {
+func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store, codexStore *codex.Store, codexRunner *codex.Runner) http.Handler {
 	integ.BindProjectionEnqueue(func(ctx context.Context, projectID int64, provider, actionType string, payload map[string]any, correlationID string) (int64, error) {
 		return canonicalSvc.EnqueueProjection(ctx, projectID, provider, actionType, payload, correlationID)
 	})
-	s := &Server{cfg: cfg, auth: authSvc, proj: proj, canonical: canonicalSvc, agent: agentClient, mail: mail, integ: integ, s3: s3, chat: chatStore}
+	s := &Server{cfg: cfg, auth: authSvc, proj: proj, canonical: canonicalSvc, agent: agentClient, mail: mail, integ: integ, s3: s3, chat: chatStore, codexStore: codexStore, codex: codexRunner}
 	s.bindCanonicalCommandExecutor()
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID, chimw.RealIP, chimw.Logger, chimw.Recoverer)
@@ -145,6 +148,18 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				prr.Post("/{id}/grooming-sign-off-capture", s.groomingSignOffCapture)
 				prr.Post("/{id}/git-apply", s.gitApply)
 				prr.Post("/{id}/implement-step", s.implementStepApply)
+				prr.Post("/{id}/implement-step/stream", s.implementStepStream)
+				prr.Post("/{id}/ship/implement-step", s.implementStepCodex)
+				prr.Post("/{id}/ship/implement-step/stream", s.implementStepStream)
+				prr.Post("/{id}/ship/codex/followup/stream", s.codexFollowUpStream)
+				prr.Post("/{id}/ship/codex/cancel", s.codexCancel)
+				prr.Post("/{id}/ship/codex/steer/stream", s.codexSteerStream)
+				prr.Get("/{id}/ship/codex/workbench", s.codexWorkbench)
+				prr.Get("/{id}/ship/codex/file", s.codexWorkbenchFile)
+				prr.Post("/{id}/ship/codex/git-action", s.codexGitAction)
+				prr.Post("/{id}/ship/pr-review", s.prReviewCodex)
+				prr.Post("/{id}/ship/pr-review/stream", s.prReviewStream)
+				prr.Post("/{id}/ship/fix-review-findings/stream", s.fixReviewFindingsStream)
 				prr.Post("/{id}/story-runs", s.createStoryRun)
 				prr.Get("/{id}/story-runs/latest", s.latestStoryRun)
 				prr.Post("/{id}/pull-request-app", s.previewPullRequestApp)

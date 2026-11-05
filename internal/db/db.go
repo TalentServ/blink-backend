@@ -53,6 +53,8 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		{"migrations/008_grooming_requirements.sql", "./migrations/008_grooming_requirements.sql"},
 		{"migrations/009_repos_graph_ship.sql", "./migrations/009_repos_graph_ship.sql"},
 		{"migrations/010_governed_command_domains.sql", "./migrations/010_governed_command_domains.sql"},
+		{"migrations/011_codex_sessions.sql", "./migrations/011_codex_sessions.sql"},
+		{"migrations/012_codex_workbench.sql", "./migrations/012_codex_workbench.sql"},
 	}
 	for _, candidates := range files {
 		body, path, err := readFirst(candidates)

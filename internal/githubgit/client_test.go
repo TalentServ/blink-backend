@@ -1,6 +1,9 @@
 package githubgit
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -238,5 +241,131 @@ func TestCommitBranchAndDraftPRClosesExistingPull(t *testing.T) {
 	}
 	if createdPRs < 1 {
 		t.Fatal("expected a new draft PR")
+	}
+}
+
+func TestGetPullRequestDiffAndFiles(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/app/pulls/9", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 9, "title": "Demo", "body": "body", "state": "open", "draft": true,
+			"html_url": "https://github.com/acme/app/pull/9",
+			"base": map[string]any{"ref": "main"},
+			"head": map[string]any{"sha": "abc123", "ref": "blink/implement-X"},
+		})
+	})
+	mux.HandleFunc("/repos/acme/app/pulls/9/files", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"filename": "src/main.go", "status": "modified", "additions": 2, "deletions": 1, "patch": "@@ -1 +1 @@\n-a\n+b\n",
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New("token")
+	c.baseURL = srv.URL
+	diff, err := c.GetPullRequestDiffAndFiles(context.Background(), "acme", "app", 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.HeadSHA != "abc123" || len(diff.Files) != 1 || diff.Files[0].Filename != "src/main.go" {
+		t.Fatalf("unexpected diff: %+v", diff)
+	}
+}
+
+func TestCreatePullRequestComment(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/app/issues/9/comments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", 405)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"html_url": "https://github.com/acme/app/pull/9#issuecomment-1"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New("token")
+	c.baseURL = srv.URL
+	url, err := c.CreatePullRequestComment(context.Background(), "acme", "app", 9, "advisory review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(url, "issuecomment") {
+		t.Fatalf("url=%q", url)
+	}
+}
+
+func TestCommitOntoExistingBranch(t *testing.T) {
+	t.Parallel()
+	var blobs int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/app/git/ref/heads/blink/fix", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "head-sha"}})
+	})
+	mux.HandleFunc("/repos/acme/app/git/commits/head-sha", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"tree": map[string]any{"sha": "tree-base"}})
+	})
+	mux.HandleFunc("/repos/acme/app/git/blobs", func(w http.ResponseWriter, r *http.Request) {
+		blobs++
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "blob"})
+	})
+	mux.HandleFunc("/repos/acme/app/git/trees", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "tree"})
+	})
+	mux.HandleFunc("/repos/acme/app/git/commits", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"sha": "new-sha", "html_url": "https://github.com/acme/app/commit/new-sha"})
+	})
+	mux.HandleFunc("/repos/acme/app/git/refs/heads/blink/fix", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method", 405)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := New("token")
+	c.baseURL = srv.URL
+	got, err := c.CommitOntoExistingBranch(context.Background(), "acme", "app", "blink/fix", "fix findings", []File{
+		{Path: "src/a.go", Content: "package a\n"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blobs == 0 || got.SHA == "" {
+		t.Fatalf("unexpected commit: blobs=%d got=%+v", blobs, got)
+	}
+}
+
+func TestExtractTextFilesFiltersBinariesAndPrefix(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	add := func(name string, body string) {
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("repo-sha/src/main.go", "package main\n")
+	add("repo-sha/node_modules/x/index.js", "nope")
+	add("repo-sha/photo.png", "xxxxx")
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := ExtractTextFiles(buf.Bytes(), 50, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != "src/main.go" {
+		t.Fatalf("unexpected extract: %+v", files)
 	}
 }

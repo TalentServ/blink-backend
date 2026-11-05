@@ -2,7 +2,9 @@
 package githubgit
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,8 +12,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Client struct {
@@ -783,9 +787,349 @@ func (c *Client) TreePaths(ctx context.Context, owner, repo, sha string) ([]stri
 	return out, nil
 }
 
+// PullRequestDiff describes a PR head and changed file patches.
+type PullRequestDiff struct {
+	Number     int               `json:"number"`
+	Title      string            `json:"title"`
+	Body       string            `json:"body"`
+	State      string            `json:"state"`
+	Draft      bool              `json:"draft"`
+	HTMLURL    string            `json:"htmlUrl"`
+	BaseBranch string            `json:"baseBranch"`
+	HeadBranch string            `json:"headBranch"`
+	HeadSHA    string            `json:"headSha"`
+	Files      []PullChangedFile `json:"files"`
+}
+
+type PullChangedFile struct {
+	Filename  string `json:"filename"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch,omitempty"`
+}
+
+// GetPullRequestDiffAndFiles fetches PR metadata and changed file patches.
+func (c *Client) GetPullRequestDiffAndFiles(ctx context.Context, owner, repo string, prNumber int) (*PullRequestDiff, error) {
+	status, raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), prNumber), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("pull request HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var pr struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		State   string `json:"state"`
+		Draft   bool   `json:"draft"`
+		HTMLURL string `json:"html_url"`
+		Base    struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(raw, &pr); err != nil {
+		return nil, err
+	}
+	filesStatus, filesRaw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", url.PathEscape(owner), url.PathEscape(repo), prNumber), nil)
+	if err != nil {
+		return nil, err
+	}
+	if filesStatus >= 400 {
+		return nil, fmt.Errorf("pull request files HTTP %d: %s", filesStatus, truncate(string(filesRaw), 200))
+	}
+	var rows []struct {
+		Filename  string `json:"filename"`
+		Status    string `json:"status"`
+		Additions int    `json:"additions"`
+		Deletions int    `json:"deletions"`
+		Patch     string `json:"patch"`
+	}
+	if err := json.Unmarshal(filesRaw, &rows); err != nil {
+		return nil, err
+	}
+	files := make([]PullChangedFile, 0, len(rows))
+	for _, row := range rows {
+		files = append(files, PullChangedFile{
+			Filename:  row.Filename,
+			Status:    row.Status,
+			Additions: row.Additions,
+			Deletions: row.Deletions,
+			Patch:     row.Patch,
+		})
+	}
+	return &PullRequestDiff{
+		Number:     pr.Number,
+		Title:      pr.Title,
+		Body:       pr.Body,
+		State:      pr.State,
+		Draft:      pr.Draft,
+		HTMLURL:    pr.HTMLURL,
+		BaseBranch: pr.Base.Ref,
+		HeadBranch: pr.Head.Ref,
+		HeadSHA:    pr.Head.SHA,
+		Files:      files,
+	}, nil
+}
+
+// CreateIssueComment posts a comment on an issue or pull request.
+func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, issueOrPRNumber int, body string) (string, error) {
+	status, raw, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), issueOrPRNumber), map[string]any{
+		"body": body,
+	})
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", fmt.Errorf("create issue comment HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	urlStr, _ := m["html_url"].(string)
+	return urlStr, nil
+}
+
+// CreatePullRequestComment is an alias for CreateIssueComment (PRs share the issues comments API).
+func (c *Client) CreatePullRequestComment(ctx context.Context, owner, repo string, prNumber int, body string) (string, error) {
+	return c.CreateIssueComment(ctx, owner, repo, prNumber, body)
+}
+
+// CommitOntoExistingBranch commits files onto an existing branch without resetting it or opening a new PR.
+func (c *Client) CommitOntoExistingBranch(ctx context.Context, owner, repo, branch, message string, files []File) (*CommitResult, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, fmt.Errorf("branch is required")
+	}
+	if _, err := c.BranchSHA(ctx, owner, repo, branch); err != nil {
+		return nil, fmt.Errorf("existing branch %s: %w", branch, err)
+	}
+	return c.CommitFiles(ctx, owner, repo, branch, message, files)
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// TarballFile is a filtered text file extracted from a GitHub tarball.
+type TarballFile struct {
+	Path    string
+	Content []byte
+}
+
+// DownloadTarball fetches GET /repos/{owner}/{repo}/tarball/{ref}.
+// Empty repositories return (nil, nil).
+func (c *Client) DownloadTarball(ctx context.Context, owner, repo, ref string) ([]byte, error) {
+	if c.token == "" {
+		return nil, fmt.Errorf("GitHub token is empty")
+	}
+	ref = strings.TrimSpace(ref)
+	p := fmt.Sprintf("/repos/%s/%s/tarball", url.PathEscape(owner), url.PathEscape(repo))
+	if ref != "" {
+		p += "/" + url.PathEscape(ref)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+p, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	client := c.http
+	if client == nil {
+		client = &http.Client{Timeout: 3 * time.Minute}
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusConflict {
+		return nil, nil
+	}
+	if res.StatusCode >= 400 {
+		raw, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
+		return nil, fmt.Errorf("tarball HTTP %d: %s", res.StatusCode, truncate(string(raw), 200))
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 80<<20))
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// ExtractTextFiles unpacks a GitHub tarball and keeps text source files only.
+func ExtractTextFiles(archive []byte, maxFiles, maxFileBytes int) ([]TarballFile, error) {
+	if len(archive) == 0 {
+		return nil, nil
+	}
+	if maxFiles <= 0 {
+		maxFiles = 200
+	}
+	if maxFileBytes <= 0 {
+		maxFileBytes = 512 << 10
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	out := make([]TarballFile, 0, 64)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		rel := stripArchivePrefix(hdr.Name)
+		if !keepTarballPath(rel) {
+			continue
+		}
+		if hdr.Size > int64(maxFileBytes) {
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(tr, int64(maxFileBytes)+1))
+		if err != nil {
+			continue
+		}
+		if len(raw) == 0 || len(raw) > maxFileBytes || !utf8.Valid(raw) {
+			continue
+		}
+		out = append(out, TarballFile{Path: rel, Content: raw})
+		if len(out) >= maxFiles {
+			break
+		}
+	}
+	return out, nil
+}
+
+func stripArchivePrefix(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimPrefix(name, "./")
+	parts := strings.SplitN(name, "/", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return name
+}
+
+func keepTarballPath(p string) bool {
+	p = strings.ReplaceAll(p, "\\", "/")
+	lower := strings.ToLower(p)
+	base := path.Base(lower)
+	if strings.Contains(lower, "/node_modules/") || strings.HasPrefix(lower, "node_modules/") {
+		return false
+	}
+	if strings.Contains(lower, "/.git/") || strings.HasPrefix(lower, ".git/") {
+		return false
+	}
+	if strings.Contains(lower, "/dist/") || strings.Contains(lower, "/build/") || strings.Contains(lower, "/.next/") {
+		return false
+	}
+	if strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg") ||
+		strings.HasSuffix(lower, ".gif") || strings.HasSuffix(lower, ".webp") || strings.HasSuffix(lower, ".ico") ||
+		strings.HasSuffix(lower, ".pdf") || strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".wasm") ||
+		strings.HasSuffix(lower, ".exe") || strings.HasSuffix(lower, ".dll") {
+		return false
+	}
+	if base == "package-lock.json" || base == "yarn.lock" || base == "pnpm-lock.yaml" {
+		return false
+	}
+	return strings.TrimSpace(p) != ""
+}
+
+// CompareFile is one path from a GitHub compare response.
+type CompareFile struct {
+	Path      string
+	Status    string
+	Patch     string
+	Additions int
+	Deletions int
+}
+
+// Compare returns the file patches between two refs.
+func (c *Client) Compare(ctx context.Context, owner, repo, base, head string) ([]CompareFile, error) {
+	apiPath := fmt.Sprintf("/repos/%s/%s/compare/%s...%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(base), url.PathEscape(head))
+	status, raw, err := c.do(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("compare HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var body struct {
+		Files []struct {
+			Filename  string `json:"filename"`
+			Status    string `json:"status"`
+			Patch     string `json:"patch"`
+			Additions int    `json:"additions"`
+			Deletions int    `json:"deletions"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	out := make([]CompareFile, 0, len(body.Files))
+	for _, f := range body.Files {
+		out = append(out, CompareFile{
+			Path: f.Filename, Status: f.Status, Patch: f.Patch, Additions: f.Additions, Deletions: f.Deletions,
+		})
+	}
+	return out, nil
+}
+
+// CommitInfo is a short commit row for the inspector.
+type CommitInfo struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	When    string `json:"when"`
+}
+
+// ListCommits lists recent commits on a ref.
+func (c *Client) ListCommits(ctx context.Context, owner, repo, ref string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 || limit > 30 {
+		limit = 20
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/commits?sha=%s&per_page=%d", url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(ref), limit)
+	status, raw, err := c.do(ctx, http.MethodGet, apiPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("commits HTTP %d: %s", status, truncate(string(raw), 200))
+	}
+	var rows []struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+			Author  struct {
+				Date string `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	out := make([]CommitInfo, 0, len(rows))
+	for _, row := range rows {
+		msg := row.Commit.Message
+		if i := strings.IndexByte(msg, '\n'); i >= 0 {
+			msg = msg[:i]
+		}
+		out = append(out, CommitInfo{SHA: row.SHA, Message: msg, When: row.Commit.Author.Date})
+	}
+	return out, nil
 }
