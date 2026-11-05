@@ -237,6 +237,38 @@ type RunningSession struct {
 	UpdatedAt time.Time
 }
 
+type ProjectUsageSummary struct {
+	ProjectID   int64
+	Turns       int
+	Completed   int
+	Failed      int
+	Cancelled   int
+	TotalTokens float64
+}
+
+func (s *Store) ProjectUsage(ctx context.Context, projectID int64) (ProjectUsageSummary, error) {
+	var out ProjectUsageSummary
+	out.ProjectID = projectID
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)::int,
+		       COUNT(*) FILTER (WHERE status = 'completed')::int,
+		       COUNT(*) FILTER (WHERE status = 'failed')::int,
+		       COUNT(*) FILTER (WHERE status = 'cancelled')::int,
+		       COALESCE(SUM(
+		           CASE
+		               WHEN usage_json->>'totalTokens' ~ '^[0-9]+([.][0-9]+)?$'
+		               THEN (usage_json->>'totalTokens')::numeric
+		               ELSE 0
+		           END
+		       ), 0)::float8
+		FROM blink_codex_turn t
+		JOIN blink_codex_session s ON s.id = t.codex_session_id
+		WHERE s.project_id = $1`, projectID).Scan(
+		&out.Turns, &out.Completed, &out.Failed, &out.Cancelled, &out.TotalTokens,
+	)
+	return out, err
+}
+
 func (s *Store) RunningSessions(ctx context.Context, projectID int64) ([]RunningSession, error) {
 	q := `
 		SELECT id, project_id, COALESCE(issue_id,''), updated_at
@@ -368,7 +400,8 @@ func (s *Store) ListTurns(ctx context.Context, sessionID uuid.UUID) ([]Turn, err
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, codex_session_id, turn_number, COALESCE(user_prompt,''), status, COALESCE(output_text,''),
 		       COALESCE(commands_json, '[]'::jsonb), COALESCE(files_json, '{}'::jsonb),
-		       COALESCE(attachments_json, '[]'::jsonb), created_at, finished_at
+		       COALESCE(attachments_json, '[]'::jsonb), COALESCE(usage_json, '{}'::jsonb),
+		       created_at, finished_at
 		FROM blink_codex_turn
 		WHERE codex_session_id = $1
 		ORDER BY turn_number ASC`, sessionID)
@@ -380,14 +413,15 @@ func (s *Store) ListTurns(ctx context.Context, sessionID uuid.UUID) ([]Turn, err
 	for rows.Next() {
 		var t Turn
 		var status string
-		var commandsRaw, filesRaw, attachmentsRaw []byte
-		if err := rows.Scan(&t.ID, &t.CodexSessionID, &t.TurnNumber, &t.UserPrompt, &status, &t.OutputText, &commandsRaw, &filesRaw, &attachmentsRaw, &t.CreatedAt, &t.FinishedAt); err != nil {
+		var commandsRaw, filesRaw, attachmentsRaw, usageRaw []byte
+		if err := rows.Scan(&t.ID, &t.CodexSessionID, &t.TurnNumber, &t.UserPrompt, &status, &t.OutputText, &commandsRaw, &filesRaw, &attachmentsRaw, &usageRaw, &t.CreatedAt, &t.FinishedAt); err != nil {
 			return nil, err
 		}
 		t.Status = SessionStatus(status)
 		_ = json.Unmarshal(commandsRaw, &t.Commands)
 		t.Files = decodeStringMap(filesRaw)
 		_ = json.Unmarshal(attachmentsRaw, &t.Attachments)
+		_ = json.Unmarshal(usageRaw, &t.Usage)
 		out = append(out, t)
 	}
 	return out, rows.Err()

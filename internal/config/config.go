@@ -12,17 +12,17 @@ import (
 
 // Config holds Blink API runtime settings. Production fails closed on secrets.
 type Config struct {
-	Port               string
-	DatabaseURL        string
-	CORSOrigins        []string
-	AgentRuntimeURL    string
-	AgentRuntimeToken  string
-	AgentLambdaName    string
-	AWSAccessKeyID     string
-	AWSSecretAccessKey string
-	AWSRegion          string
-	S3BucketName       string
-	S3PublicBaseURL    string
+	Port                 string
+	DatabaseURL          string
+	CORSOrigins          []string
+	AgentRuntimeURL      string
+	AgentRuntimeToken    string
+	AgentLambdaName      string
+	AWSAccessKeyID       string
+	AWSSecretAccessKey   string
+	AWSRegion            string
+	S3BucketName         string
+	S3PublicBaseURL      string
 	AutomationSDLCPath   string
 	AISDLCPath           string
 	AISDLCRepoTarballURL string
@@ -30,12 +30,14 @@ type Config struct {
 	CanonicalPython      string
 	CanonicalTimeout     time.Duration
 
-	OpenAIAPIKey        string
-	CodexModel          string
-	CodexContainerSize  string
-	CodexNetworkAccess  string
-	CodexAllowedDomains []string
-	CodexTurnTimeout    time.Duration
+	OpenAIAPIKey              string
+	CodexModel                string
+	CodexContainerSize        string
+	CodexNetworkAccess        string
+	CodexAllowedDomains       []string
+	CodexTurnTimeout          time.Duration
+	CodexMaxConcurrentStories int
+	CodexMaxTurnsPerProject   int
 
 	JiraClientID     string
 	JiraClientSecret string
@@ -92,17 +94,17 @@ func Load() (Config, error) {
 		_ = godotenv.Load("../../.env")
 	}
 	c := Config{
-		Port:               env("PORT", "8090"),
-		DatabaseURL:        firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("SPRING_DATASOURCE_URL"), "postgres://blink:blink@localhost:5432/blink?sslmode=disable"),
-		CORSOrigins:        splitCSV(env("BLINK_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")),
-		AgentRuntimeURL:    env("BLINK_AGENT_RUNTIME_URL", "https://z5i3yybrx1.execute-api.us-west-2.amazonaws.com"),
-		AgentRuntimeToken:  os.Getenv("BLINK_AGENT_RUNTIME_TOKEN"),
-		AgentLambdaName:    env("BLINK_AGENT_RUNTIME_LAMBDA_FUNCTION", "blink-agent-runtime"),
-		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-		AWSRegion:          env("AWS_REGION", "us-west-2"),
-		S3BucketName:       os.Getenv("S3_BUCKET_NAME"),
-		S3PublicBaseURL:    os.Getenv("S3_PUBLIC_BASE_URL"),
+		Port:                 env("PORT", "8090"),
+		DatabaseURL:          firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("SPRING_DATASOURCE_URL"), "postgres://blink:blink@localhost:5432/blink?sslmode=disable"),
+		CORSOrigins:          splitCSV(env("BLINK_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174")),
+		AgentRuntimeURL:      env("BLINK_AGENT_RUNTIME_URL", "https://z5i3yybrx1.execute-api.us-west-2.amazonaws.com"),
+		AgentRuntimeToken:    os.Getenv("BLINK_AGENT_RUNTIME_TOKEN"),
+		AgentLambdaName:      env("BLINK_AGENT_RUNTIME_LAMBDA_FUNCTION", "blink-agent-runtime"),
+		AWSAccessKeyID:       os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:   os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AWSRegion:            env("AWS_REGION", "us-west-2"),
+		S3BucketName:         os.Getenv("S3_BUCKET_NAME"),
+		S3PublicBaseURL:      os.Getenv("S3_PUBLIC_BASE_URL"),
 		AutomationSDLCPath:   env("BLINK_AUTOMATION_SDLC_PATH", "../automation_sdlc"),
 		AISDLCPath:           env("BLINK_AI_SDLC_PATH", "../ai-sdlc"),
 		AISDLCRepoTarballURL: env("BLINK_AI_SDLC_TARBALL_URL", "https://codeload.github.com/ai-sdlc-framework/ai-sdlc/tar.gz/refs/heads/main"),
@@ -110,12 +112,14 @@ func Load() (Config, error) {
 		CanonicalPython:      env("BLINK_CANONICAL_SETUP_PYTHON", "python3"),
 		CanonicalTimeout:     durationEnv("BLINK_CANONICAL_SETUP_TIMEOUT", 90*time.Second),
 
-		OpenAIAPIKey:        firstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY")),
-		CodexModel:          env("BLINK_CODEX_MODEL", "gpt-6-luna"),
-		CodexContainerSize:  env("BLINK_CODEX_CONTAINER_SIZE", "small"),
-		CodexNetworkAccess:  env("BLINK_CODEX_NETWORK_ACCESS", "disabled"),
-		CodexAllowedDomains: splitCSV(os.Getenv("BLINK_CODEX_ALLOWED_DOMAINS")),
-		CodexTurnTimeout:    durationEnv("BLINK_CODEX_TURN_TIMEOUT", 10*time.Minute),
+		OpenAIAPIKey:              firstNonEmpty(os.Getenv("OPENAI_API_KEY"), os.Getenv("LLM_API_KEY")),
+		CodexModel:                env("BLINK_CODEX_MODEL", "gpt-6-luna"),
+		CodexContainerSize:        env("BLINK_CODEX_CONTAINER_SIZE", "small"),
+		CodexNetworkAccess:        env("BLINK_CODEX_NETWORK_ACCESS", "disabled"),
+		CodexAllowedDomains:       splitCSV(os.Getenv("BLINK_CODEX_ALLOWED_DOMAINS")),
+		CodexTurnTimeout:          durationEnv("BLINK_CODEX_TURN_TIMEOUT", 10*time.Minute),
+		CodexMaxConcurrentStories: intEnv("BLINK_CODEX_MAX_CONCURRENT_STORIES", 3),
+		CodexMaxTurnsPerProject:   intEnv("BLINK_CODEX_MAX_TURNS_PER_PROJECT", 150),
 
 		JiraClientID:     os.Getenv("BLINK_JIRA_CLIENT_ID"),
 		JiraClientSecret: os.Getenv("BLINK_JIRA_CLIENT_SECRET"),

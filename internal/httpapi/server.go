@@ -30,21 +30,21 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	auth      *auth.Service
-	proj      *project.Service
-	canonical *canonical.Service
-	agent     *agent.Client
-	mail      *mailer.Service
-	integ     *integrations.Service
-	s3        *s3ws.Service
+	cfg           config.Config
+	auth          *auth.Service
+	proj          *project.Service
+	canonical     *canonical.Service
+	agent         *agent.Client
+	mail          *mailer.Service
+	integ         *integrations.Service
+	s3            *s3ws.Service
 	chat          *chat.Store
 	codexStore    *codex.Store
-	codex         *codex.Runner
+	codex         codex.ExecutionRunner
 	storyRunStore *storyRunMemory
 }
 
-func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store, codexStore *codex.Store, codexRunner *codex.Runner) http.Handler {
+func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canonicalSvc *canonical.Service, agentClient *agent.Client, mail *mailer.Service, integ *integrations.Service, s3 *s3ws.Service, chatStore *chat.Store, codexStore *codex.Store, codexRunner codex.ExecutionRunner) http.Handler {
 	integ.BindProjectionEnqueue(func(ctx context.Context, projectID int64, provider, actionType string, payload map[string]any, correlationID string) (int64, error) {
 		return canonicalSvc.EnqueueProjection(ctx, projectID, provider, actionType, payload, correlationID)
 	})

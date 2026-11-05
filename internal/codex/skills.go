@@ -111,6 +111,9 @@ func BuildEphemeralGovernanceFiles(bundle *GovernanceBundle) []StagedFile {
 	if bundle.QualityGate != nil {
 		files = append(files, StagedFile{Path: "/workspace/.ai-sdlc/quality-gate.json", Content: mustJSON(bundle.QualityGate)})
 	}
+	if bundle.Adapter != nil {
+		files = append(files, StagedFile{Path: "/workspace/.ai-sdlc/adapter-binding.json", Content: mustJSON(bundle.Adapter)})
+	}
 	return files
 }
 

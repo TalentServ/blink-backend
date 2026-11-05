@@ -190,6 +190,7 @@ func workbenchTurns(turns []codex.Turn) []map[string]any {
 			"status":      string(t.Status),
 			"markdown":    t.OutputText,
 			"attachments": t.Attachments,
+			"usage":       t.Usage,
 			"activity":    activity,
 			"files":       t.Files,
 			"createdAt":   t.CreatedAt,

@@ -44,6 +44,16 @@ func TestIsRetryableErr(t *testing.T) {
 	}
 }
 
+func TestParseProgressMarker(t *testing.T) {
+	stage, message, ok := parseProgressMarker("[ai-sdlc-progress] self-review: checked acceptance criteria")
+	if !ok || stage != "self-review" || message != "checked acceptance criteria" {
+		t.Fatalf("unexpected progress marker: %q %q %v", stage, message, ok)
+	}
+	if _, _, ok := parseProgressMarker("ordinary command output"); ok {
+		t.Fatal("ordinary output should not be treated as a progress marker")
+	}
+}
+
 func TestMockAgentsSessionLifecycle(t *testing.T) {
 	var deleted atomic.Int32
 	var deleteCalls atomic.Int32

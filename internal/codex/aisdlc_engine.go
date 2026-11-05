@@ -13,6 +13,7 @@ import (
 	"github.com/ai-sdlc-framework/ai-sdlc/sdk-go/builders"
 	"github.com/ai-sdlc-framework/ai-sdlc/sdk-go/core"
 	"github.com/ai-sdlc-framework/ai-sdlc/sdk-go/policy"
+	"github.com/ai-sdlc-framework/ai-sdlc/sdk-go/security"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	metricTestsPresent    = "tests-present"
 	metricMajorFindings   = "critical-or-major-findings"
 	metricHumanMerge      = "human-merge-approval"
+	metricPromptInjection = "prompt-injection-detected"
 )
 
 // GovernanceBundle is the sdk-go resource set for one Codex turn.
@@ -29,33 +31,58 @@ type GovernanceBundle struct {
 	Pipeline    *core.Pipeline
 	AgentRole   *core.AgentRole
 	QualityGate *core.QualityGate
+	Adapter     *core.AdapterBinding
 }
 
 // GateOutcome is the post-harvest enforcement result.
 type GateOutcome struct {
-	Passed     bool
-	Blocked    bool
-	Reason     string
-	Results    []policy.GateResult
-	Provenance *core.ProvenanceRecord
-	Audit      []*audit.AuditEntry
+	Passed       bool
+	Blocked      bool
+	Reason       string
+	Results      []policy.GateResult
+	Provenance   *core.ProvenanceRecord
+	Audit        []*audit.AuditEntry
+	Complexity   *policy.ComplexityResult
+	ApprovalTier security.ApprovalTier
 }
 
-func intPtr(v int) *int          { return &v }
-func boolPtr(v bool) *bool       { return &v }
+type GovernanceOptions struct {
+	MaxFilesPerChange *int
+	RequireTests      *bool
+	BlockedPaths      []string
+}
+
+func intPtr(v int) *int           { return &v }
+func boolPtr(v bool) *bool        { return &v }
 func floatPtr(v float64) *float64 { return &v }
 
 // BuildImplementGovernance constructs implement/follow-up/fix resources.
 func BuildImplementGovernance(projectName, issueID, techStack string) (*GovernanceBundle, error) {
-	return buildGovernance(projectName, issueID, techStack, false)
+	return buildGovernance(projectName, issueID, techStack, false, GovernanceOptions{})
+}
+
+func BuildImplementGovernanceWithOptions(projectName, issueID, techStack string, options GovernanceOptions) (*GovernanceBundle, error) {
+	return buildGovernance(projectName, issueID, techStack, false, options)
 }
 
 // BuildReviewGovernance constructs review / merge-readiness resources.
 func BuildReviewGovernance(projectName, issueID, techStack string) (*GovernanceBundle, error) {
-	return buildGovernance(projectName, issueID, techStack, true)
+	return buildGovernance(projectName, issueID, techStack, true, GovernanceOptions{})
 }
 
-func buildGovernance(projectName, issueID, techStack string, review bool) (*GovernanceBundle, error) {
+func buildGovernance(projectName, issueID, techStack string, review bool, options GovernanceOptions) (*GovernanceBundle, error) {
+	maxFiles := maxFilesPerChange
+	if options.MaxFilesPerChange != nil && *options.MaxFilesPerChange > 0 {
+		maxFiles = *options.MaxFilesPerChange
+	}
+	requireTests := true
+	if options.RequireTests != nil {
+		requireTests = *options.RequireTests
+	}
+	blockedPaths := options.BlockedPaths
+	if len(blockedPaths) == 0 {
+		blockedPaths = []string{".env*", "*.pem", ".ai-sdlc/**", "AGENTS.md", "capabilities/**"}
+	}
 	roleName := "implement-agent"
 	roleTitle := "implement"
 	goal := "Implement the approved story as product code and tests inside the staged repo. Do not push, open PRs, or write governance files into the repo."
@@ -65,7 +92,7 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 		goal = "Review the staged PR diff for code, test, and security issues. Advisory only. Never claim human merge approval."
 	}
 
-	pipe, err := builders.NewPipelineBuilder("blink-" + roleTitle).
+	pipe, err := builders.NewPipelineBuilder("blink-"+roleTitle).
 		Label("project", sanitizeResourceName(projectName)).
 		Label("issue", sanitizeResourceName(issueID)).
 		AddTrigger("blink.codex."+roleTitle, nil).
@@ -73,6 +100,11 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 		AddStage(roleTitle, roleName, &builders.StageOptions{
 			QualityGates: []string{"blink-" + roleTitle + "-gates"},
 			Timeout:      "10m",
+			OnFailure: &core.FailurePolicy{
+				Strategy:   core.FailureRetry,
+				MaxRetries: intPtr(3),
+				RetryDelay: "1s",
+			},
 		}).
 		Build()
 	if err != nil {
@@ -87,9 +119,9 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 		AddTool("read").
 		AddTool("test").
 		WithConstraints(&core.Constraints{
-			MaxFilesPerChange: intPtr(maxFilesPerChange),
-			RequireTests:      boolPtr(true),
-			BlockedPaths:      []string{".env*", "*.pem", ".ai-sdlc/**", "AGENTS.md", "capabilities/**"},
+			MaxFilesPerChange: intPtr(maxFiles),
+			RequireTests:      boolPtr(requireTests),
+			BlockedPaths:      blockedPaths,
 		}).
 		AddHandoff("blink-backend", "turn-complete", &core.HandoffContract{
 			Schema:         "blink-result.json",
@@ -103,7 +135,7 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 
 	qg := builders.NewQualityGateBuilder("blink-" + roleTitle + "-gates")
 	qg.AddGate("files-within-budget", core.EnforcementHardMandatory, core.GateRule{
-		Metric: metricFilesChanged, Operator: "<=", Threshold: floatPtr(maxFilesPerChange),
+		Metric: metricFilesChanged, Operator: "<=", Threshold: floatPtr(float64(maxFiles)),
 	}, nil)
 	qg.AddGate("no-blocked-paths", core.EnforcementHardMandatory, core.GateRule{
 		Metric: metricBlockedPaths, Operator: "==", Threshold: floatPtr(0),
@@ -115,6 +147,9 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 		qg.AddGate("review-findings", core.EnforcementSoftMandatory, core.GateRule{
 			Metric: metricMajorFindings, Operator: "==", Threshold: floatPtr(0),
 		}, nil)
+		qg.AddGate("no-prompt-injection", core.EnforcementHardMandatory, core.GateRule{
+			Metric: metricPromptInjection, Operator: "==", Threshold: floatPtr(0),
+		}, nil)
 	} else {
 		qg.AddGate("tests-present", core.EnforcementSoftMandatory, core.GateRule{
 			Metric: metricTestsPresent, Operator: ">=", Threshold: floatPtr(1),
@@ -125,7 +160,25 @@ func buildGovernance(projectName, issueID, techStack string, review bool) (*Gove
 		return nil, err
 	}
 
-	bundle := &GovernanceBundle{Pipeline: pipe, AgentRole: role, QualityGate: quality}
+	adapter, err := builders.NewAdapterBindingBuilder("blink-codex-agents").
+		Namespace("blink").
+		Label("project", sanitizeResourceName(projectName)).
+		Label("issue", sanitizeResourceName(issueID)).
+		Interface(core.InterfaceSandbox).
+		Type("openai-agents-codex").
+		Version("v1").
+		Source("blink-backend/internal/codex").
+		Config(map[string]interface{}{
+			"networkAccess": "disabled",
+			"gitWrites":     "blink-backend",
+			"sessionPolicy": "ephemeral-between-human-turns",
+		}).
+		Build()
+	if err != nil {
+		return nil, err
+	}
+
+	bundle := &GovernanceBundle{Pipeline: pipe, AgentRole: role, QualityGate: quality, Adapter: adapter}
 	if err := admitBundle(bundle); err != nil {
 		return nil, err
 	}
@@ -141,7 +194,7 @@ func admitBundle(b *GovernanceBundle) error {
 		_ = core.Validate(r.GetKind(), asMap(r))
 		return nil
 	})
-	for _, res := range []core.AnyResource{b.Pipeline, b.AgentRole, b.QualityGate} {
+	for _, res := range []core.AnyResource{b.Pipeline, b.AgentRole, b.QualityGate, b.Adapter} {
 		resp := pipe.AdmitResource(context.Background(), &policy.AdmissionRequest{
 			Resource:  res,
 			Operation: "create",
@@ -195,6 +248,37 @@ func EvaluateHarvestedTurn(bundle *GovernanceBundle, kind WorkflowKind, model, p
 		}
 	}
 	major := countMajorFindings(envelope)
+	promptInjection := 0.0
+	if boolField(envelope, "promptInjectionDetected") {
+		promptInjection = 1
+	}
+	linesChanged := 0
+	securitySensitive := false
+	apiChange := false
+	databaseMigration := false
+	for p, content := range product {
+		linesChanged += strings.Count(content, "\n") + 1
+		lower := strings.ToLower(p)
+		if strings.Contains(lower, "auth") || strings.Contains(lower, "security") || strings.Contains(lower, ".env") {
+			securitySensitive = true
+		}
+		if strings.Contains(lower, "migration") || strings.HasSuffix(lower, ".sql") {
+			databaseMigration = true
+		}
+		if strings.Contains(lower, "/api/") || strings.Contains(lower, "handler") || strings.Contains(lower, "route") {
+			apiChange = true
+		}
+	}
+	complexity := policy.EvaluateComplexity(&policy.ComplexityInput{
+		FilesAffected: len(product), LinesOfChange: linesChanged,
+		SecuritySensitive: securitySensitive, APIChange: apiChange,
+		DatabaseMigration: databaseMigration, CrossServiceChange: len(product) > 1,
+	}, nil)
+	approvalTier := security.ClassifyApprovalTier(
+		securitySensitive || promptInjection > 0,
+		apiChange || databaseMigration,
+		linesChanged,
+	)
 	prov := core.CreateProvenance(first(model, "gpt-6-luna"), "blink-codex-cloud", hashPrompt(prompt), core.WithReviewDecision(core.ReviewPending))
 	provMap := map[string]string{
 		"model":          prov.Model,
@@ -209,11 +293,12 @@ func EvaluateHarvestedTurn(bundle *GovernanceBundle, kind WorkflowKind, model, p
 	}
 	eval := &policy.EvaluationContext{
 		Metrics: map[string]float64{
-			metricFilesChanged:  float64(len(product)),
-			metricBlockedPaths:  float64(len(blocked)),
-			metricTestsPresent:  float64(tests),
-			metricMajorFindings: float64(major),
-			metricHumanMerge:    human,
+			metricFilesChanged:    float64(len(product)),
+			metricBlockedPaths:    float64(len(blocked)),
+			metricTestsPresent:    float64(tests),
+			metricMajorFindings:   float64(major),
+			metricHumanMerge:      human,
+			metricPromptInjection: promptInjection,
 		},
 		AIAuthored: true,
 		Provenance: provMap,
@@ -246,12 +331,14 @@ func EvaluateHarvestedTurn(bundle *GovernanceBundle, kind WorkflowKind, model, p
 		results = enforced.Results
 	}
 	return &GateOutcome{
-		Passed:     passed,
-		Blocked:    !passed,
-		Reason:     first(reason, "quality gate failed"),
-		Results:    results,
-		Provenance: prov,
-		Audit:      sink.Entries,
+		Passed:       passed,
+		Blocked:      !passed,
+		Reason:       first(reason, "quality gate failed"),
+		Results:      results,
+		Provenance:   prov,
+		Audit:        sink.Entries,
+		Complexity:   complexity,
+		ApprovalTier: approvalTier,
 	}
 }
 
@@ -269,6 +356,11 @@ func countMajorFindings(env map[string]any) int {
 		}
 	}
 	return n
+}
+
+func boolField(m map[string]any, key string) bool {
+	v, ok := m[key].(bool)
+	return ok && v
 }
 
 func extractEnvelopeFindings(env map[string]any) []map[string]any {

@@ -11,14 +11,15 @@ import (
 const contextBudget = 24 * 1024
 
 type wizardStory struct {
-	ID                  string   `json:"id"`
-	EpicID              string   `json:"epicId"`
-	Title               string   `json:"title"`
-	Objective           string   `json:"objective"`
-	AsA                 string   `json:"asA"`
-	IWant               string   `json:"iWant"`
-	SoThat              string   `json:"soThat"`
-	AcceptanceCriteria  []string `json:"acceptanceCriteria"`
+	ID                 string   `json:"id"`
+	EpicID             string   `json:"epicId"`
+	DependsOn          []string `json:"dependsOn"`
+	Title              string   `json:"title"`
+	Objective          string   `json:"objective"`
+	AsA                string   `json:"asA"`
+	IWant              string   `json:"iWant"`
+	SoThat             string   `json:"soThat"`
+	AcceptanceCriteria []string `json:"acceptanceCriteria"`
 }
 
 type wizardStateView struct {
@@ -42,22 +43,22 @@ type wizardStateView struct {
 		} `json:"steps"`
 	} `json:"technicalPlan"`
 	WorkClassification *struct {
-		Markdown  string `json:"markdown"`
-		WorkType  string `json:"workType"`
-		Risk      string `json:"riskSummary"`
+		Markdown string `json:"markdown"`
+		WorkType string `json:"workType"`
+		Risk     string `json:"riskSummary"`
 	} `json:"workClassification"`
-	ArchitectureStyle string   `json:"architectureStyle"`
-	RepoTechnologies  []any    `json:"repoTechnologies"`
+	ArchitectureStyle string    `json:"architectureStyle"`
+	RepoTechnologies  []any     `json:"repoTechnologies"`
 	Repositories      []repoRef `json:"repositories"`
 }
 
 type hydratedCodexContext struct {
-	IssueID    string
-	Story      *wizardStory
-	Vars       codex.PromptVars
-	TechStack  []string
-	Repos      []repoRef
-	Admission  error
+	IssueID   string
+	Story     *wizardStory
+	Vars      codex.PromptVars
+	TechStack []string
+	Repos     []repoRef
+	Admission error
 }
 
 func hydrateCodexContext(wizard json.RawMessage, body codexBody, issueID string) hydratedCodexContext {

@@ -15,19 +15,46 @@ func TestBuildImplementGovernanceAndHardGateBlocks(t *testing.T) {
 	if bundle.Pipeline == nil || bundle.AgentRole == nil || bundle.QualityGate == nil {
 		t.Fatal("missing resources")
 	}
+	if bundle.Adapter == nil || bundle.Adapter.Spec.Type != "openai-agents-codex" {
+		t.Fatalf("missing Codex adapter binding: %#v", bundle.Adapter)
+	}
 	if core.APIVersion != "ai-sdlc.io/v1alpha1" {
 		t.Fatalf("unexpected api version %s", core.APIVersion)
 	}
 
 	files := map[string]string{
-		"src/main.go": "package main",
+		"src/main.go":            "package main",
 		".ai-sdlc/pipeline.yaml": "kind: Pipeline",
-		"AGENTS.md": "# no",
+		"AGENTS.md":              "# no",
 	}
 	env := map[string]any{"summary": "changed too many things", "commitMessage": "feat: x"}
 	out := EvaluateHarvestedTurn(bundle, WorkflowImplementStep, "gpt-test", "prompt", "output", files, env, false)
 	if out == nil || !out.Blocked {
 		t.Fatalf("expected blocked gate, got %#v", out)
+	}
+}
+
+func TestReviewGateBlocksPromptInjectionSignal(t *testing.T) {
+	bundle, err := BuildReviewGovernance("Demo App", "DEMO-1", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := EvaluateHarvestedTurn(
+		bundle,
+		WorkflowPRReview,
+		"gpt-test",
+		"review prompt",
+		"review output",
+		map[string]string{"src/main.go": "package main"},
+		map[string]any{
+			"summary":                 "reviewed",
+			"findings":                []any{},
+			"promptInjectionDetected": true,
+		},
+		false,
+	)
+	if out == nil || !out.Blocked {
+		t.Fatalf("expected prompt-injection gate to block, got %#v", out)
 	}
 }
 

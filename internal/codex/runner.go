@@ -21,6 +21,18 @@ import (
 // EventEmitter receives normalized SSE payloads for the Blink UI.
 type EventEmitter func(event string, payload map[string]any) bool
 
+// ExecutionRunner is the provider-neutral execution contract used by the
+// Blink control plane. Concrete providers may use OpenAI hosted sessions,
+// a local runner, or another managed execution service.
+type ExecutionRunner interface {
+	Configured() bool
+	Run(context.Context, RunRequest, EventEmitter) (*RunResult, error)
+	Steer(context.Context, int64, string, string, []string) error
+	CancelActive(context.Context, int64, string) error
+	CancelAll(context.Context, int64) error
+	LiveBlinkSessions() map[uuid.UUID]struct{}
+}
+
 // RunRequest drives one Codex sandbox turn.
 type RunRequest struct {
 	ProjectID      int64
@@ -370,6 +382,7 @@ func (r *Runner) runOnce(
 	commands := []map[string]any{}
 	artifactsMeta := []map[string]any{}
 	usage := map[string]any{}
+	startedAt := time.Now()
 	status := StatusCompleted
 	errCode, errMsg := "", ""
 
@@ -431,12 +444,25 @@ func (r *Runner) runOnce(
 				commandBuf.WriteString(text[idx+1:])
 				if line != "" {
 					_ = emit("activity", map[string]any{"kind": "command", "text": line, "status": "running"})
+					if stage, message, ok := parseProgressMarker(line); ok {
+						_ = emit("activity", map[string]any{
+							"kind":   "stage",
+							"stage":  stage,
+							"text":   message,
+							"status": "running",
+						})
+					}
 				}
 			}
 		case "agent.session.turn.completed":
 			if ev.Turn.ID != "" {
 				openaiTurnID = ev.Turn.ID
 			}
+			usage["inputTokens"] = ev.Usage.InputTokens
+			usage["outputTokens"] = ev.Usage.OutputTokens
+			usage["cachedInputTokens"] = ev.Usage.InputTokensDetails.CachedTokens
+			usage["reasoningTokens"] = ev.Usage.OutputTokensDetails.ReasoningTokens
+			usage["totalTokens"] = ev.Usage.TotalTokens
 			if ev.Turn.SubagentID != "" {
 				// ignore nested subagent completion for top-level status
 				continue
@@ -518,6 +544,9 @@ func (r *Runner) runOnce(
 			_ = emit("activity", map[string]any{"kind": "file", "text": p, "status": string(status)})
 		}
 	}
+	usage["durationMs"] = time.Since(startedAt).Milliseconds()
+	usage["commandCount"] = len(commands)
+	usage["filesChanged"] = len(files)
 
 	history := append([]map[string]any{}, sess.History...)
 	history = append(history, map[string]any{
@@ -566,6 +595,25 @@ func (r *Runner) runOnce(
 	_ = emit("status", map[string]any{"phase": "completed", "turnId": openaiTurnID})
 	_ = emit("activity", map[string]any{"kind": "status", "text": "Artifacts harvested", "status": "completed"})
 	return out, false, nil
+}
+
+func parseProgressMarker(line string) (stage, message string, ok bool) {
+	const prefix = "[ai-sdlc-progress]"
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	stage = strings.TrimSpace(parts[0])
+	message = strings.TrimSpace(parts[1])
+	if stage == "" || message == "" {
+		return "", "", false
+	}
+	return stage, message, true
 }
 
 func (r *Runner) downloadOutputs(ctx context.Context, sessionID string, final *openai.BetaAgentTurnResult) (map[string]string, []map[string]any, error) {
