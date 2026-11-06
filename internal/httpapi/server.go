@@ -203,6 +203,7 @@ func New(cfg config.Config, authSvc *auth.Service, proj *project.Service, canoni
 				ir.Post("/figma/oauth/exchange", s.integ.FigmaOAuthExchange)
 				ir.Post("/jira/projects", s.integ.JiraProjects)
 				ir.Post("/github/orgs", s.integ.GitHubOrgs)
+				ir.Post("/github/repos", s.integ.GitHubRepos)
 				ir.Post("/figma/teams", s.integ.FigmaTeams)
 				ir.Post("/figma/projects", s.integ.FigmaProjects)
 				ir.Post("/figma/files", s.integ.FigmaFiles)
