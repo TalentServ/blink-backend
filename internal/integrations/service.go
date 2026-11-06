@@ -538,31 +538,131 @@ func (s *Service) JiraProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.fetchJiraProjects(r.Context(), ctxJ))
 }
 
+func githubAPIHeaders(token string) map[string]string {
+	return map[string]string{
+		"Authorization":        "Bearer " + token,
+		"Accept":               "application/vnd.github+json",
+		"X-GitHub-Api-Version": "2022-11-28",
+	}
+}
+
+func (s *Service) githubCreds(r *http.Request, req map[string]any) (token, organization string) {
+	stored, _ := s.load(r.Context(), parseID(req["projectId"]), "github")
+	token = firstNonEmpty(str(req["token"]), stored.AccessToken)
+	organization = firstNonEmpty(str(req["organization"]), stored.Organization)
+	if owner := ownerFromAuth(r); owner != "" {
+		if u, ok := s.loadUser(r.Context(), owner, "github"); ok {
+			token = firstNonEmpty(token, u.AccessToken)
+			organization = firstNonEmpty(organization, u.Organization)
+		}
+	}
+	return token, organization
+}
+
 func (s *Service) GitHubOrgs(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	_ = readJSON(r, &req)
-	stored, _ := s.load(r.Context(), parseID(req["projectId"]), "github")
-	token := firstNonEmpty(str(req["token"]), stored.AccessToken)
+	token, _ := s.githubCreds(r, req)
 	if token == "" {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-	_, body, err := s.do(r.Context(), http.MethodGet, "https://api.github.com/user/orgs",
-		map[string]string{"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"}, nil)
-	if err != nil {
+	headers := githubAPIHeaders(token)
+	out := make([]map[string]any, 0)
+	if _, body, err := s.do(r.Context(), http.MethodGet, "https://api.github.com/user", headers, nil); err == nil {
+		var me map[string]any
+		if json.Unmarshal([]byte(body), &me) == nil {
+			if login := str(me["login"]); login != "" {
+				out = append(out, map[string]any{
+					"id": str(me["id"]), "login": login, "name": firstNonEmpty(str(me["name"]), login),
+					"avatarUrl": str(me["avatar_url"]), "personal": true,
+				})
+			}
+		}
+	}
+	if _, body, err := s.do(r.Context(), http.MethodGet, "https://api.github.com/user/orgs", headers, nil); err == nil {
+		var raw []map[string]any
+		_ = json.Unmarshal([]byte(body), &raw)
+		for _, o := range raw {
+			out = append(out, map[string]any{
+				"id": str(o["id"]), "login": str(o["login"]), "name": firstNonEmpty(str(o["name"]), str(o["login"])),
+				"avatarUrl": str(o["avatar_url"]),
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Service) githubRepoPages(ctx context.Context, endpoint string, headers map[string]string) []map[string]any {
+	out := make([]map[string]any, 0)
+	for page := 1; page <= 2; page++ {
+		status, body, err := s.do(ctx, http.MethodGet, endpoint+"&page="+strconv.Itoa(page), headers, nil)
+		if err != nil || status < 200 || status >= 300 || strings.TrimSpace(body) == "" {
+			break
+		}
+		var raw []map[string]any
+		if json.Unmarshal([]byte(body), &raw) != nil || len(raw) == 0 {
+			break
+		}
+		for _, item := range raw {
+			name := str(item["name"])
+			htmlURL := str(item["html_url"])
+			if name == "" || htmlURL == "" {
+				continue
+			}
+			archived, _ := item["archived"].(bool)
+			if archived {
+				continue
+			}
+			privateRepo, _ := item["private"].(bool)
+			out = append(out, map[string]any{
+				"name":          name,
+				"fullName":      firstNonEmpty(str(item["full_name"]), name),
+				"htmlUrl":       htmlURL,
+				"description":   str(item["description"]),
+				"language":      str(item["language"]),
+				"defaultBranch": firstNonEmpty(str(item["default_branch"]), "main"),
+				"privateRepo":   privateRepo,
+				"archived":      archived,
+			})
+		}
+		if len(raw) < 50 {
+			break
+		}
+	}
+	return out
+}
+
+func (s *Service) GitHubRepos(w http.ResponseWriter, r *http.Request) {
+	var req map[string]any
+	_ = readJSON(r, &req)
+	token, organization := s.githubCreds(r, req)
+	if token == "" {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-	var raw []map[string]any
-	_ = json.Unmarshal([]byte(body), &raw)
-	out := make([]map[string]any, 0, len(raw))
-	for _, o := range raw {
-		out = append(out, map[string]any{
-			"id": str(o["id"]), "login": str(o["login"]), "name": firstNonEmpty(str(o["name"]), str(o["login"])),
-			"avatarUrl": str(o["avatar_url"]),
-		})
+	personal := boolVal(req["personal"]) || organization == ""
+	headers := githubAPIHeaders(token)
+	userEndpoint := "https://api.github.com/user/repos?per_page=50&sort=updated&affiliation=owner,collaborator,organization_member"
+	if !personal && organization != "" {
+		orgEndpoint := "https://api.github.com/orgs/" + url.PathEscape(organization) + "/repos?per_page=50&sort=updated&type=all"
+		if out := s.githubRepoPages(r.Context(), orgEndpoint, headers); len(out) > 0 {
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, s.githubRepoPages(r.Context(), userEndpoint, headers))
+}
+
+func boolVal(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "true")
+	default:
+		return false
+	}
 }
 
 func (s *Service) FigmaTeams(w http.ResponseWriter, r *http.Request) {
